@@ -11,7 +11,7 @@ exports.default = async context => {
 
   if (context.electronPlatformName === 'darwin') {
     // Downstream: rename macOS app bundle for AKS desktop branding
-    dest = path.join(context.appOutDir, 'AKSDesktop.app/Contents/Resources/app/node_modules');
+    dest = path.join(context.appOutDir, 'AKS Desktop.app/Contents/Resources/app/node_modules');
   }
 
   try {
