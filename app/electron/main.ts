@@ -574,14 +574,14 @@ class PluginManagerEventListeners {
  */
 function parseEnvironmentVariables(output: string, separator: string): NodeJS.ProcessEnv {
   const envVars: NodeJS.ProcessEnv = {};
-  
+
   if (!output.trim()) {
     return envVars;
   }
 
   const lines = output.trim().split(separator);
   const isWindows = process.platform === 'win32';
-  
+
   lines.forEach(line => {
     // On Windows, clean up any remaining carriage returns or newlines that might cause issues
     // On Unix-like systems, just trim whitespace as the original logic was working fine
@@ -644,13 +644,15 @@ async function getShellEnvWin(): Promise<NodeJS.ProcessEnv> {
 
     // Try PowerShell first - get all environment variables (load profile but non-interactive)
     // Note: We don't use -NoProfile because it would skip user profile scripts that add tools like Azure CLI to PATH
-    const { stdout } = await execPromisify('powershell -NonInteractive -Command "Get-ChildItem Env: | ForEach-Object { \\"$($_.Name)=$($_.Value)\\" }"', {
-      encoding: 'utf8',
-      timeout: 10000,
-      env,
-    });
+    const { stdout } = await execPromisify(
+      'powershell -NonInteractive -Command "Get-ChildItem Env: | ForEach-Object { \\"$($_.Name)=$($_.Value)\\" }"',
+      {
+        encoding: 'utf8',
+        timeout: 10000,
+        env,
+      }
+    );
     const shellEnv: NodeJS.ProcessEnv = { ...process.env };
-
 
     // Parse PowerShell output to get all environment variables
     const shellEnvVars = parseEnvironmentVariables(stdout, '\n');
@@ -667,7 +669,6 @@ async function getShellEnvWin(): Promise<NodeJS.ProcessEnv> {
         env,
       });
       const cmdEnv: NodeJS.ProcessEnv = { ...process.env };
-
 
       const cmdEnvVars = parseEnvironmentVariables(cmdStdout, '\r\n');
       Object.assign(cmdEnv, cmdEnvVars);
@@ -724,7 +725,9 @@ export async function getShellEnv(): Promise<NodeJS.ProcessEnv> {
       }));
     }
 
-    const envVars = isEnvNull ? parseEnvironmentVariables(stdout, '\0') : parseEnvironmentVariables(stdout, '\n');
+    const envVars = isEnvNull
+      ? parseEnvironmentVariables(stdout, '\0')
+      : parseEnvironmentVariables(stdout, '\n');
     const mergedEnv = { ...process.env, ...envVars };
     return mergedEnv;
   } catch (error) {
@@ -1441,6 +1444,8 @@ async function initializeShellEnvironment(): Promise<NodeJS.ProcessEnv> {
 
 async function startElecron() {
   console.info('App starting...');
+  // add run cmd consent for aks-desktop to avoid consent dialogs for the aks-desktop plugin
+  addRunCmdConsent({ name: 'aks-desktop' });
 
   let appVersion: string;
   if (isDev && process.env.HEADLAMP_APP_VERSION) {
