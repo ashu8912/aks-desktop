@@ -31,7 +31,7 @@ import React, { memo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useDispatch } from 'react-redux';
 import { useHistory } from 'react-router-dom';
-import { getProductName, getVersion } from '../../helpers/getProductInfo';
+import { getAksDesktopVersion, getProductName, getVersion } from '../../helpers/getProductInfo';
 import { logout } from '../../lib/auth';
 import { useCluster, useClustersConf } from '../../lib/k8s';
 import { clusterRequest } from '../../lib/k8s/api/v1/clusterRequests';
@@ -382,7 +382,7 @@ export const PureTopBar = memo(
             <Icon icon="mdi:information-outline" />
           </ListItemIcon>
           <ListItemText>
-            {getProductName()} {getVersion()['VERSION']}
+            {getProductName()} {getAksDesktopVersion() ?? getVersion()['VERSION']}
           </ListItemText>
         </MenuItem>
       </Menu>
