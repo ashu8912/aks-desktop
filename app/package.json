@@ -78,6 +78,10 @@
       "extraResources": [
         {
           "from": "../backend/headlamp-server"
+        },
+        {
+          "from": "./resources/external-tools",
+          "to": "external-tools"
         }
       ]
     },
@@ -100,6 +104,10 @@
       "extraResources": [
         {
           "from": "../backend/headlamp-server"
+        },
+        {
+          "from": "./resources/external-tools",
+          "to": "external-tools"
         }
       ]
     },
@@ -111,6 +119,10 @@
       "extraResources": [
         {
           "from": "../backend/headlamp-server.exe"
+        },
+        {
+          "from": "./resources/external-tools",
+          "to": "external-tools"
         }
       ]
     },
