@@ -27,7 +27,6 @@ import { formatClusterPathParam } from '../../../lib/cluster';
 import { useClustersConf, useClustersVersion } from '../../../lib/k8s';
 import { ApiError } from '../../../lib/k8s/api/v2/ApiError';
 import { Cluster } from '../../../lib/k8s/cluster';
-import { createRouteURL } from '../../../lib/router/createRouteURL';
 import { getClusterPrefixedPath } from '../../../lib/util';
 import { useTypedSelector } from '../../../redux/hooks';
 import { Loader } from '../../common';
@@ -122,7 +121,6 @@ export default function ClusterTable({
 }: ClusterTableProps) {
   const history = useHistory();
   const { t } = useTranslation(['translation']);
-  const theme = useTheme();
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
 
   // Check Azure login status via window object (set by aks-desktop plugin)
@@ -191,84 +189,88 @@ export default function ClusterTable({
           {t('Add a cluster to get started.')}
         </Typography>
         {isElectron() && (
-            <Box
-              sx={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 3,
-              }}
-            >
-              {isLoggedIn === false && (
-                <>
-                  <Typography variant="h6" color="textSecondary" align="center">
-                    {t('translation|Please sign in to add your AKS clusters')}
-                  </Typography>
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'center' }}>
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      size="large"
-                      startIcon={<Icon icon="mdi:login" />}
-                      onClick={() => history.push('/azure/login')}
-                    >
-                      {t('translation|Sign In with Azure')}
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      color="primary"
-                      size="large"
-                      startIcon={<Icon icon="mdi:plus-circle" />}
-                      onClick={() => {
-                        history.push('/add-cluster');
-                      }}
-                    >
-                      {t('translation|Add Other Clusters')}
-                    </Button>
-                  </Box>
-                </>
-              )}
+          <Box
+            sx={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 3,
+            }}
+          >
+            {isLoggedIn === false && (
+              <>
+                <Typography variant="h6" color="textSecondary" align="center">
+                  {t('translation|Please sign in to add your AKS clusters')}
+                </Typography>
+                <Box
+                  sx={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'center' }}
+                >
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    size="large"
+                    startIcon={<Icon icon="mdi:login" />}
+                    onClick={() => history.push('/azure/login')}
+                  >
+                    {t('translation|Sign In with Azure')}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="primary"
+                    size="large"
+                    startIcon={<Icon icon="mdi:plus-circle" />}
+                    onClick={() => {
+                      history.push('/add-cluster');
+                    }}
+                  >
+                    {t('translation|Add Other Clusters')}
+                  </Button>
+                </Box>
+              </>
+            )}
 
-              {isLoggedIn === true && (
-                <>
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'center' }}>
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      size="large"
-                      startIcon={<Icon icon="mdi:microsoft-azure" />}
-                      onClick={() => {
-                        history.push('/add-cluster-aks');
-                      }}
-                    >
-                      {t('translation|Add from Azure Subscription')}
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      color="primary"
-                      size="large"
-                      startIcon={<Icon icon="mdi:plus-circle" />}
-                      onClick={() => {
-                        history.push('/add-cluster');
-                      }}
-                    >
-                      {t('translation|Add Other Clusters')}
-                    </Button>
-                  </Box>
-                </>
-              )}
+            {isLoggedIn === true && (
+              <>
+                <Box
+                  sx={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'center' }}
+                >
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    size="large"
+                    startIcon={<Icon icon="mdi:microsoft-azure" />}
+                    onClick={() => {
+                      history.push('/add-cluster-aks');
+                    }}
+                  >
+                    {t('translation|Add from Azure Subscription')}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="primary"
+                    size="large"
+                    startIcon={<Icon icon="mdi:plus-circle" />}
+                    onClick={() => {
+                      history.push('/add-cluster');
+                    }}
+                  >
+                    {t('translation|Add Other Clusters')}
+                  </Button>
+                </Box>
+              </>
+            )}
 
-              {isLoggedIn === null && (
-                <>
-                  <Typography variant="h6" color="textSecondary" align="center">
-                    {t('translation|No clusters configured')}
-                  </Typography>
-                  <Typography variant="body2" color="textSecondary" align="center">
-                    {t('translation|Checking authentication status...')}
-                  </Typography>
-                </>
-              )}
-            </Box>
+            {isLoggedIn === null && (
+              <>
+                <Typography variant="h6" color="textSecondary" align="center">
+                  {t('translation|No clusters configured')}
+                </Typography>
+                <Typography variant="body2" color="textSecondary" align="center">
+                  {t('translation|Checking authentication status...')}
+                </Typography>
+              </>
+            )}
+          </Box>
         )}
       </Box>
     );
