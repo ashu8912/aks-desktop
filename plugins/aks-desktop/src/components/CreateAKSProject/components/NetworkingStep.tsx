@@ -4,7 +4,7 @@
 import { TextField } from '@mui/material';
 import { Box, MenuItem, Typography } from '@mui/material';
 import React from 'react';
-import { NetworkingStepProps } from '../types';
+import type { NetworkingStepProps } from '../types';
 import { EGRESS_OPTIONS, INGRESS_OPTIONS } from '../types';
 
 /**

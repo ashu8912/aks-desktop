@@ -4,7 +4,7 @@
 import { Icon } from '@iconify/react';
 import { Box, Typography } from '@mui/material';
 import React from 'react';
-import { ResourceCardProps } from '../types';
+import type { ResourceCardProps } from '../types';
 
 /**
  * Resource card component for displaying CPU/Memory configuration

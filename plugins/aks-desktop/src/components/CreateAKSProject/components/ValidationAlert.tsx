@@ -3,7 +3,7 @@
 
 import { Alert, AlertTitle, Box } from '@mui/material';
 import React from 'react';
-import { ValidationAlertProps } from '../types';
+import type { ValidationAlertProps } from '../types';
 
 /**
  * Reusable validation alert component

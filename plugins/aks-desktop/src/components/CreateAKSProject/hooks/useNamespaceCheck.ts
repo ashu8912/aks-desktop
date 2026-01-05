@@ -3,7 +3,7 @@
 
 import { useCallback, useState } from 'react';
 import { checkNamespaceExists } from '../../../utils/azure/az-cli';
-import { NamespaceStatus } from '../types';
+import type { NamespaceStatus } from '../types';
 
 /**
  * Custom hook for managing namespace existence checks

@@ -5,7 +5,7 @@ import { Icon } from '@iconify/react';
 import { TextField } from '@mui/material';
 import { Box, Button, FormControl, Grid, IconButton, MenuItem, Typography } from '@mui/material';
 import React from 'react';
-import { AccessStepProps, UserAssignment } from '../types';
+import type { AccessStepProps, UserAssignment } from '../types';
 import { AVAILABLE_ROLES, ROLE_DESCRIPTIONS } from '../types';
 import { isValidEmail } from '../validators';
 import FormField from './FormField';

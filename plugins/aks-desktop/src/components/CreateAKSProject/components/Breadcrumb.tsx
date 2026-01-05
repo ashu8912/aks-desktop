@@ -5,7 +5,7 @@ import { Icon } from '@iconify/react';
 import { styled } from '@mui/material';
 import { Box, Typography } from '@mui/material';
 import React from 'react';
-import { BreadcrumbProps } from '../types';
+import type { BreadcrumbProps } from '../types';
 
 const PREFIX = 'Breadcrumb';
 

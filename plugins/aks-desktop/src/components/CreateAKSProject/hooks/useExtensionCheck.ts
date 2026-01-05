@@ -6,7 +6,7 @@ import {
   installAksPreviewExtension,
   isAksPreviewExtensionInstalled,
 } from '../../../utils/azure/az-cli';
-import { ExtensionStatus } from '../types';
+import type { ExtensionStatus } from '../types';
 
 /**
  * Custom hook for managing AKS Preview Extension status

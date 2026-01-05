@@ -7,7 +7,7 @@ import {
   registerContainerServiceProvider,
   registerManagedNamespacePreview,
 } from '../../../utils/azure/az-cli';
-import { FeatureStatus } from '../types';
+import type { FeatureStatus } from '../types';
 
 /**
  * Custom hook for managing ManagedNamespacePreview feature status

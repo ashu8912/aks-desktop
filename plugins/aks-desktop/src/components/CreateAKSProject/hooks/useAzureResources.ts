@@ -3,7 +3,7 @@
 
 import { useCallback, useState } from 'react';
 import { getClusters, getSubscriptions } from '../../../utils/azure/az-cli';
-import { AzureResourceState } from '../types';
+import type { AzureResourceState } from '../types';
 
 /**
  * Custom hook for managing Azure resources (subscriptions and clusters)

@@ -5,7 +5,7 @@ import { Icon } from '@iconify/react';
 import { styled } from '@mui/material';
 import { Box, Card, Grid, Typography } from '@mui/material';
 import React from 'react';
-import { ReviewStepProps } from '../types';
+import type { ReviewStepProps } from '../types';
 import { formatCpuValue, formatMemoryValue } from '../validators';
 
 const PREFIX = 'ReviewStep';

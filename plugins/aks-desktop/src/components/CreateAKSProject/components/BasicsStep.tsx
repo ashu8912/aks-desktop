@@ -9,7 +9,7 @@ import { Box, Button, CircularProgress, FormControl, IconButton, Typography } fr
 import React, { useEffect, useRef, useState } from 'react';
 import { useAzureAuth } from '../../../hooks/useAzureAuth';
 import { registerAKSCluster } from '../../../utils/azure/aks';
-import { BasicsStepProps } from '../types';
+import type { BasicsStepProps } from '../types';
 import FormField from './FormField';
 import { SearchableSelect, SearchableSelectOption } from './SearchableSelect';
 import ValidationAlert from './ValidationAlert';

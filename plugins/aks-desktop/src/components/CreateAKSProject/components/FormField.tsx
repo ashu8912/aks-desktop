@@ -4,7 +4,7 @@
 import { styled } from '@mui/material';
 import { InputAdornment, TextField } from '@mui/material';
 import React from 'react';
-import { FormFieldProps } from '../types';
+import type { FormFieldProps } from '../types';
 
 const PREFIX = 'FormField';
 

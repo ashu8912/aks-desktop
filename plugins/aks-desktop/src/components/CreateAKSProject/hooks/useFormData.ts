@@ -2,7 +2,8 @@
 // Licensed under the Apache 2.0.
 
 import { useCallback, useState } from 'react';
-import { DEFAULT_FORM_DATA, FormData } from '../types';
+import type { FormData } from '../types';
+import { DEFAULT_FORM_DATA } from '../types';
 
 /**
  * Custom hook for managing form data state
