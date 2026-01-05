@@ -3,7 +3,7 @@
 
 import React, { useState } from 'react';
 import { useHistory } from 'react-router-dom';
-import { RegisterAKSClusterDialog } from '../AKS';
+import RegisterAKSClusterDialog from './RegisterAKSClusterDialog';
 
 /**
  * Page component for the AKS cluster registration flow
