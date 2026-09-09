@@ -617,6 +617,7 @@ export default function RegisterAKSClusterDialog({
       markAksHybridEdgeAppearance(selectedCluster.name);
 
       finishRegistration(isMountedRef.current, setLoading);
+      setRegistrationSucceeded(true);
       setSuccess(
         t("Cluster '{{cluster}}' successfully connected", {
           cluster: selectedCluster.name,
