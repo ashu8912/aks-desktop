@@ -2,6 +2,7 @@
 // Licensed under the Apache 2.0.
 
 import { Icon } from '@iconify/react';
+import { useTranslation } from '@kinvolk/headlamp-plugin/lib';
 import { alpha, Box, Card, CardContent, Typography } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import React from 'react';
@@ -19,42 +20,46 @@ export interface SourceStepProps {
   onSourceTypeChange: (type: 'container' | 'yaml') => void;
 }
 
-const deploymentSources: DeploymentSource[] = [
-  {
-    type: 'container',
-    displayName: 'Container Image',
-    description: 'Deploy from Azure Container Registry, Docker Hub, or GHCR',
-    icon: 'container',
-    features: [
-      'Auto-generated Deployment and Service manifests',
-      'Guided configuration for ports, replicas, env, and resources',
-      'No Kubernetes expertise required to get started',
-    ],
-  },
-  {
-    type: 'yaml',
-    displayName: 'Kubernetes YAML',
-    description: 'Bring your own Kubernetes manifests to deploy',
-    icon: 'yaml',
-    features: [
-      'Use existing manifests for full control',
-      'Multi-file support (Deployments, Services, Ingress, etc.)',
-      'Preview and basic validation before apply',
-    ],
-  },
-];
+function getDeploymentSources(t: (key: string) => string): DeploymentSource[] {
+  return [
+    {
+      type: 'container',
+      displayName: t('Container Image'),
+      description: t('Deploy from Azure Container Registry, Docker Hub, or GHCR'),
+      icon: 'container',
+      features: [
+        t('Auto-generated Deployment and Service manifests'),
+        t('Guided configuration for ports, replicas, env, and resources'),
+        t('No Kubernetes expertise required to get started'),
+      ],
+    },
+    {
+      type: 'yaml',
+      displayName: t('Kubernetes YAML'),
+      description: t('Bring your own Kubernetes manifests to deploy'),
+      icon: 'yaml',
+      features: [
+        t('Use existing manifests for full control'),
+        t('Multi-file support (Deployments, Services, Ingress, etc.)'),
+        t('Preview and basic validation before apply'),
+      ],
+    },
+  ];
+}
 
 export default function SourceStep({ sourceType, onSourceTypeChange }: SourceStepProps) {
+  const { t } = useTranslation();
   const theme = useTheme();
+  const deploymentSources = getDeploymentSources(t);
   return (
     <Box>
       <Typography variant="h5" gutterBottom sx={{ fontWeight: 600, mb: 1 }}>
-        Select Source
+        {t('Select Source')}
       </Typography>
       <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
-        Choose a source for your deployment (container image, repo, etc.).
+        {t('Choose a source for your deployment (container image, repo, etc.).')}
       </Typography>
-      <Box sx={{ display: 'flex', gap: 3, mt: 2 }}>
+      <Box role="group" aria-label={t('Deployment source')} sx={{ display: 'flex', gap: 3, mt: 2 }}>
         {deploymentSources.map(source => {
           const selected = sourceType === source.type;
           const iconName =
@@ -62,7 +67,17 @@ export default function SourceStep({ sourceType, onSourceTypeChange }: SourceSte
           return (
             <Card
               key={source.type}
+              role="button"
+              tabIndex={0}
+              aria-pressed={selected}
+              aria-label={source.displayName}
               onClick={() => onSourceTypeChange(source.type)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSourceTypeChange(source.type);
+                }
+              }}
               elevation={selected ? 4 : 1}
               sx={{
                 flex: 1,
@@ -116,7 +131,13 @@ export default function SourceStep({ sourceType, onSourceTypeChange }: SourceSte
                       transition: 'all 0.3s ease',
                     }}
                   >
-                    <Icon icon={iconName} width={36} height={36} color="contrastText" />
+                    <Icon
+                      icon={iconName}
+                      width={36}
+                      height={36}
+                      color={theme.palette.primary[selected ? 'contrastText' : 'main']}
+                      aria-hidden="true"
+                    />
                   </Box>
                   {selected && (
                     <Box
@@ -140,6 +161,7 @@ export default function SourceStep({ sourceType, onSourceTypeChange }: SourceSte
                         color={theme.palette.getContrastText(theme.palette.primary.main)}
                         width={18}
                         height={18}
+                        aria-hidden="true"
                       />
                     </Box>
                   )}
@@ -181,7 +203,7 @@ export default function SourceStep({ sourceType, onSourceTypeChange }: SourceSte
                       fontSize: '0.7rem',
                     }}
                   >
-                    Features
+                    {t('Features')}
                   </Typography>
                   <Box
                     component="ul"
@@ -193,34 +215,40 @@ export default function SourceStep({ sourceType, onSourceTypeChange }: SourceSte
                       position: 'relative',
                     }}
                   >
-                    {source.features.map(feature => (
-                      <Box
-                        component="li"
-                        key={feature}
-                        sx={{
-                          position: 'relative',
-                          pl: 2.5,
-                          mb: 1.5,
-                          '&::before': {
-                            content: '""',
-                            position: 'absolute',
-                            left: 0,
-                            top: '0.5em',
-                            width: 6,
-                            height: 6,
-                            borderRadius: '50%',
-                            backgroundColor: selected ? 'primary.main' : 'text.secondary',
-                          },
-                          '&:last-child': {
-                            mb: 0,
-                          },
-                        }}
-                      >
-                        <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.6 }}>
-                          {feature}
-                        </Typography>
-                      </Box>
-                    ))}
+                    {source.features
+                      .filter(x => x)
+                      .map(feature => (
+                        <Box
+                          component="li"
+                          key={feature}
+                          sx={{
+                            position: 'relative',
+                            pl: 2.5,
+                            mb: 1.5,
+                            '&::before': {
+                              content: '""',
+                              position: 'absolute',
+                              left: 0,
+                              top: '0.5em',
+                              width: 6,
+                              height: 6,
+                              borderRadius: '50%',
+                              backgroundColor: selected ? 'primary.main' : 'text.secondary',
+                            },
+                            '&:last-child': {
+                              mb: 0,
+                            },
+                          }}
+                        >
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            sx={{ lineHeight: 1.6 }}
+                          >
+                            {feature}
+                          </Typography>
+                        </Box>
+                      ))}
                   </Box>
                 </Box>
               </CardContent>

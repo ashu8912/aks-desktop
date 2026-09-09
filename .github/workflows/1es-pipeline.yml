@@ -14,7 +14,7 @@ parameters:
     default: 20.x
   - name: goVersion
     type: string
-    default: 1.24.9
+    default: 1.26.3
 
 extends:
   # The pipeline extends the 1ES PT which will inject different SDL and compliance tasks.
@@ -42,6 +42,18 @@ extends:
       - stage: Stage
         jobs:
           - job: HostJob
+            variables:
+              NPM_CONFIG_REGISTRY: https://packagefeedproxy.microsoft.io/npm/
+              NPM_CONFIG_REPLACE_REGISTRY_HOST: npmjs
+              # pypi.org is blocked outbound on this pool the same way npmjs is
+              # (pip fails with WinError 10013), so route pip through the same
+              # Microsoft package feed proxy. Bundling the connectedk8s az CLI
+              # extension needs it: the extension wheel itself comes from an
+              # Azure blob host that is reachable, but its dependencies
+              # (kubernetes, pycryptodome, oras, ...) are fetched from PyPI by
+              # the pip that `az extension add` shells out to, which inherits
+              # this variable.
+              PIP_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
             # If the pipeline publishes artifacts, use `templateContext` to define the artifacts.
             # This will enable 1ES PT to run SDL analysis tools on the artifacts and then upload them.
             templateContext:
@@ -100,6 +112,7 @@ extends:
                 displayName: "Debug: Checkout"
               # Build the Windows application
               - bash: |
+                  set -e  # fail the step when the build fails
                   echo "=== BUILD DEBUG START ==="
                   echo "Current working directory: $(pwd)"
                   echo "Node version: $(node --version)"
@@ -154,7 +167,7 @@ extends:
                   echo "=== COPY EXECUTABLE DEBUG END ==="
 
                   echo "Finding built .exe file..."
-                  EXE_PATH=$(find headlamp/app/dist -type f -name "aks-desktop*.exe" -print -quit)
+                  EXE_PATH=$(find headlamp/app/dist -type f -name "aks-desktop-*-win-x64.exe" -print -quit)
 
                   if [ -z "$EXE_PATH" ]; then
                     echo "❌ No aks-desktop .exe file found in headlamp/app/dist!" >&2
@@ -282,4 +295,3 @@ extends:
                   echo "=== END ARTIFACT DEBUG ==="
                 displayName: "Debug: Artifact Publishing"
                 condition: succeeded()
-

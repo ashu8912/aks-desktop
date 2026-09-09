@@ -6,6 +6,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { copyShippedPlugin } from './plugin-packaging';
+import {
+  aksMcpBinaryPath,
+  isExecutable,
+  isSupportedAksMcpArch,
+  matchesChecksum,
+  parseTargetArgs,
+  readStagedTarget,
+  resolveAksMcpTarget,
+  resolveTargetArch,
+} from './aks-mcp-config';
+import {
+  expectedAzCliExtensions,
+  isAzCliStagedForTarget,
+  readAzureCliConfig,
+  resolveAzCliVersion,
+} from './az-cli-config';
 
 const SCRIPT_DIR = __dirname;
 const ROOT_DIR = path.dirname(SCRIPT_DIR);
@@ -22,60 +39,118 @@ const externalToolsDir = path.join(
   'resources',
   'external-tools'
 );
-if (!fs.existsSync(externalToolsDir)) {
-  console.log('External tools not found. Setting up...');
+// Packaging passes the electron-builder target here so cross-architecture
+// builds stage the matching binaries instead of the build host's.
+const targetArgs = parseTargetArgs(process.argv.slice(2));
+const targetPlatform = targetArgs.platform ?? process.platform;
+const targetArch = resolveTargetArch(targetArgs.arch);
+// The values reach a shell command below, so keep them to plain identifiers.
+for (const value of [targetPlatform, targetArch]) {
+  if (!/^[a-z0-9_]+$/.test(value)) {
+    console.error(`Invalid build target value: ${value}`);
+    process.exit(1);
+  }
+}
+console.log(`Target: ${targetPlatform}/${targetArch}`);
+
+// Individual tools are checked against their pinned checksum, so incremental
+// builds also pick up tools that were added or whose version or target
+// architecture changed since the last setup, without deleting the directory.
+function isAksMcpStagedForTarget(): boolean {
+  const staged = readStagedTarget(ROOT_DIR);
+  if (staged?.platform !== targetPlatform || staged?.arch !== targetArch) {
+    return false;
+  }
+  if (!isSupportedAksMcpArch(targetArch)) {
+    return !fs.existsSync(aksMcpBinaryPath(ROOT_DIR, targetPlatform));
+  }
+  const aksMcp = resolveAksMcpTarget(ROOT_DIR, targetPlatform, targetArch);
+  return (
+    matchesChecksum(aksMcp.targetPath, aksMcp.expectedChecksum) &&
+    isExecutable(aksMcp.targetPath, targetPlatform)
+  );
+}
+
+const aksMcpStaged = isAksMcpStagedForTarget();
+
+// Unlike aks-mcp, download-az-cli.ts always stages for the build host
+// (process.platform), not the packaging --platform target, so check it
+// against the host rather than targetPlatform.
+const azureCliConfig = readAzureCliConfig(ROOT_DIR);
+const expectedAzCliVersion = resolveAzCliVersion(azureCliConfig, process.platform);
+const azCliStaged = isAzCliStagedForTarget(
+  ROOT_DIR,
+  process.platform,
+  expectedAzCliVersion,
+  expectedAzCliExtensions(azureCliConfig, process.platform)
+);
+
+if (!fs.existsSync(externalToolsDir) || !aksMcpStaged || !azCliStaged) {
+  if (!aksMcpStaged && fs.existsSync(externalToolsDir)) {
+    console.log(`aks-mcp is missing or not staged for ${targetPlatform}/${targetArch}.`);
+  }
+  if (!azCliStaged && fs.existsSync(externalToolsDir)) {
+    console.log(
+      `Azure CLI is missing or not staged for ${process.platform} at the pinned version ` +
+        `(${expectedAzCliVersion ?? 'unknown'}).`
+    );
+  }
+  console.log('Setting up external tools...');
   execSync(
-    `npx --yes tsx "${path.join(SCRIPT_DIR, 'setup-external-tools.ts')}"`,
+    `npx --yes tsx "${path.join(SCRIPT_DIR, 'setup-external-tools.ts')}" ` +
+      `--platform=${targetPlatform} --arch=${targetArch}`,
     {
       stdio: 'inherit',
     }
   );
 } else {
   console.log('External tools already present. Skipping setup.');
-  console.log(`To re-setup, remove: ${externalToolsDir}`);
+  console.log(
+    `To re-setup (e.g. after changing the Azure CLI pin), remove: ${externalToolsDir}`
+  );
 }
-
-// Go to the plugin directory
-const pluginDir = path.join(ROOT_DIR, 'plugins', 'aks-desktop');
-process.chdir(pluginDir);
 
 // Ensure we are in the repository with the headlamp directory
 if (!fs.existsSync(path.join(ROOT_DIR, 'headlamp'))) {
   console.log("Error: Headlamp repository directory 'headlamp' not found.");
-  console.log(`Current directory: ${process.cwd()}`);
   console.log(`Root directory: ${ROOT_DIR}`);
-  console.log(fs.readdirSync('.'));
+  console.log(fs.readdirSync(ROOT_DIR));
   process.exit(1);
 }
 
-// Get the current plugin name from package.json
-const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
-const pluginName = packageJson.name;
+// List of plugins to build and bundle
+const PLUGINS = ['aks-desktop', 'ai-assistant', 'insights-plugin', 'plugin-catalog'];
 
-console.log(`Building plugin: ${pluginName}`);
+for (const plugin of PLUGINS) {
+  const pluginDir = path.join(ROOT_DIR, 'plugins', plugin);
 
-// Build the aks-plugin
-execSync('npm install && npm run build', { stdio: 'inherit' });
+  if (!fs.existsSync(pluginDir)) {
+    console.log(`Warning: Plugin directory not found: ${pluginDir}. Skipping.`);
+    continue;
+  }
 
-console.log(`Copying built files for plugin: ${pluginName}`);
-const targetDir = path.join(ROOT_DIR, 'headlamp', '.plugins', pluginName);
-fs.mkdirSync(targetDir, { recursive: true });
+  process.chdir(pluginDir);
 
-// Copy dist folder contents
-const distDir = path.join(pluginDir, 'dist');
-fs.readdirSync(distDir).forEach((file) => {
-  const src = path.join(distDir, file);
-  const dest = path.join(targetDir, file);
-  fs.cpSync(src, dest, { recursive: true });
-});
+  // Get the current plugin name from package.json
+  const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+  const pluginName = packageJson.name;
 
-// Copy package.json
-fs.copyFileSync('./package.json', path.join(targetDir, 'package.json'));
+  console.log('==========================================');
+  console.log(`Building plugin: ${pluginName}`);
+  console.log('==========================================');
+
+  // Build the plugin
+  execSync('npm install && npm run build', { stdio: 'inherit' });
+
+  console.log(`Copying built files for plugin: ${pluginName}`);
+  const pluginsDir = path.join(ROOT_DIR, 'headlamp', '.plugins');
+  const targetDir = copyShippedPlugin(pluginDir, pluginsDir, pluginName);
+
+  console.log(`Plugin ${pluginName} has been built and copied to ${targetDir}`);
+}
 
 // List the contents of the headlamp plugins directory
 console.log(
-  'Listing contents of headlamp .plugins directory after copying plugin'
+  'Listing contents of headlamp .plugins directory after copying plugins'
 );
 console.log(fs.readdirSync(path.join(ROOT_DIR, 'headlamp', '.plugins')));
-
-console.log(`Plugin ${pluginName} has been built and copied to ${targetDir}`);

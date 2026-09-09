@@ -14,13 +14,23 @@ import * as https from 'https';
 import * as http from 'http';
 import { execSync } from 'child_process';
 import { createHash } from 'crypto';
-import { pipeline } from 'stream/promises';
 import { createWriteStream, createReadStream } from 'fs';
+import {
+  azCliBinaryPath,
+  azCliTargetDir,
+  azCliTargetDirHasContent,
+  expectedAzCliExtensions,
+  generateWindowsAzWrapperScript,
+  isAzCliStagedForTarget,
+  readStagedAzCli,
+  resolveAzCliVersion,
+  WINDOWS_AZ_CLI_EXTENSIONS_DIRNAME,
+  WINDOWS_AZ_CLI_ORIGINAL_FILENAME,
+  writeStagedAzCli,
+} from './az-cli-config';
 
 const SCRIPT_DIR = __dirname;
 const ROOT_DIR = path.dirname(SCRIPT_DIR);
-const EXTERNAL_TOOLS_DIR = path.join(ROOT_DIR, 'headlamp', 'app', 'resources', 'external-tools');
-const AZ_CLI_DIR = path.join(EXTERNAL_TOOLS_DIR, 'az-cli');
 const PACKAGE_JSON_PATH = path.join(ROOT_DIR, 'package.json');
 const TEMP_DIR = path.join(os.tmpdir(), `az-cli-download-${process.pid}`);
 
@@ -71,9 +81,11 @@ const azureCliPlatformConfig = azureCliConfig?.[CURRENT_PLATFORM as keyof ToolCo
 
 const PYTHON_URL = pythonConfig?.url;
 const PYTHON_CHECKSUM = pythonConfig?.checksum;
-const AZ_CLI_VERSION = azureCliPlatformConfig?.version || azureCliConfig?.version;
+const AZ_CLI_VERSION = resolveAzCliVersion(azureCliConfig, CURRENT_PLATFORM);
 const AZ_CLI_CHECKSUM = azureCliPlatformConfig?.checksum;
-const AZ_CLI_EXTENSIONS = azureCliConfig?.extensions || [];
+// The configured extension set, installed identically on every platform -
+// including win32, via installAzCliWindows() below.
+const AZ_CLI_EXTENSIONS = expectedAzCliExtensions(azureCliConfig, CURRENT_PLATFORM);
 
 console.log('==========================================');
 console.log(`Downloading Azure CLI v${AZ_CLI_VERSION}`);
@@ -84,7 +96,7 @@ if (PYTHON_URL) {
 }
 console.log('==========================================');
 
-const TARGET_DIR = path.join(AZ_CLI_DIR, CURRENT_PLATFORM);
+const TARGET_DIR = azCliTargetDir(ROOT_DIR, CURRENT_PLATFORM);
 
 // Create directory structure
 fs.mkdirSync(TARGET_DIR, { recursive: true });
@@ -102,15 +114,37 @@ process.on('SIGINT', () => {
   process.exit(1);
 });
 
-// Check if already installed
-const azWrapperPath = path.join(TARGET_DIR, 'bin', CURRENT_PLATFORM === 'win32' ? 'az.cmd' : 'az-wrapper');
-if (fs.existsSync(azWrapperPath)) {
-  console.log(`✅ Azure CLI already installed for ${CURRENT_PLATFORM}`);
-  console.log(`   Location: ${TARGET_DIR}`);
-  console.log('');
-  console.log('To force re-download, remove the directory first:');
-  console.log(`   rm -rf ${TARGET_DIR}`);
-  process.exit(0);
+// Check if already installed. A directory that exists but has no wrapper
+// binary (e.g. an install interrupted before that final step) is still
+// treated as an existing install - not an empty target - because it may
+// already carry stale extensions (cliextensions/aks-preview) that must be
+// wiped rather than silently overlaid by the fresh install below.
+const azWrapperPath = azCliBinaryPath(ROOT_DIR, CURRENT_PLATFORM);
+if (azCliTargetDirHasContent(ROOT_DIR, CURRENT_PLATFORM)) {
+  const staged = readStagedAzCli(ROOT_DIR, CURRENT_PLATFORM);
+  const isCurrent = isAzCliStagedForTarget(ROOT_DIR, CURRENT_PLATFORM, AZ_CLI_VERSION, AZ_CLI_EXTENSIONS);
+
+  if (isCurrent) {
+    console.log(`✅ Azure CLI already installed for ${CURRENT_PLATFORM}`);
+    console.log(`   Location: ${TARGET_DIR}`);
+    console.log('');
+    console.log('To force re-download, remove the directory first:');
+    console.log(`   rm -rf ${TARGET_DIR}`);
+    process.exit(0);
+  }
+
+  // Either the staged install predates the current pin (or has no marker at
+  // all, meaning it predates this check) and may still bundle an extension
+  // set - such as aks-preview - that the current config no longer wants, or
+  // it never reached the wrapper-script step and is simply incomplete. In
+  // both cases it may still carry stale extensions, so wipe it and fall
+  // through to a fresh download instead of overlaying onto it.
+  const reason = fs.existsSync(azWrapperPath)
+    ? `out of date (found ${staged?.version ?? 'unmarked install'}, expected ${AZ_CLI_VERSION})`
+    : 'incomplete (missing az wrapper binary from a prior install)';
+  console.log(`⚠️  Staged Azure CLI for ${CURRENT_PLATFORM} is ${reason}. Removing and re-downloading...`);
+  fs.rmSync(TARGET_DIR, { recursive: true, force: true });
+  fs.mkdirSync(TARGET_DIR, { recursive: true });
 }
 
 /**
@@ -240,15 +274,104 @@ function extractZip(archivePath: string, outputDir: string): void {
 }
 
 /**
+ * Strip credentials out of text before it reaches the build log. A pip index
+ * URL carrying a PAT (`https://user:token@pkgs.dev.azure.com/...`) is routine
+ * for an internal feed, and CI only masks secrets it was told about - so the
+ * diagnostics below, which exist to reveal exactly that kind of index
+ * configuration, must not print the token along with it.
+ */
+function redactCredentials(text: string): string {
+  return text.replace(/\/\/[^/\s:@]+:[^/\s@]+@/g, '//***:***@');
+}
+
+/**
+ * Log the interpreter and pip identity used for extension installs, so an
+ * environment difference (a pip.ini pointing at an internal index, blocked
+ * PyPI egress, etc.) is visible in the build log even when every extension
+ * install succeeds. Best-effort only - none of these probes are required for
+ * the actual install to work, so a probe failing here must not fail the build.
+ */
+function logPipDiagnostics(pythonExe: string): void {
+  console.log('--- pip diagnostics ---');
+  const probes: Array<[string, string]> = [
+    ['interpreter', `"${pythonExe}" -V`],
+    ['pip version', `"${pythonExe}" -m pip -V`],
+    ['pip config', `"${pythonExe}" -m pip config debug`],
+  ];
+  for (const [label, cmd] of probes) {
+    try {
+      const output = execSync(cmd, { encoding: 'utf-8' }).trim();
+      console.log(`${label}: ${redactCredentials(output)}`);
+    } catch (error) {
+      // A failed probe's message carries the output the command managed to
+      // produce, so it needs the same redaction as the success path.
+      console.warn(`⚠️  Could not determine ${label}: ${redactCredentials(String(error))}`);
+    }
+  }
+  console.log('------------------------');
+}
+
+/**
+ * Install a single Azure CLI extension, capturing pip's real error on failure.
+ * `az extension add` swallows pip's own stdout/stderr unless --debug is passed,
+ * so a pip failure shows up as an opaque "Pip failed with status code 1" with
+ * no indication of why (wrong index, blocked egress, a corporate pip.ini,
+ * etc). On failure we re-run once with --debug purely to capture and print
+ * that context - the diagnostic re-run is never authoritative (pip's own
+ * state, e.g. its cache, can behave differently the second time), so its
+ * outcome is ignored and the original error is always what gets thrown.
+ */
+function addAzCliExtension(pythonExe: string, extension: string, extensionDir: string): void {
+  // These commands go through a shell, so reject anything that isn't a plain
+  // extension name rather than interpolating it. The names come from
+  // package.json, not from user input, but a typo there should fail here with
+  // an obvious message instead of turning into shell syntax.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(extension)) {
+    throw new Error(`Refusing to install Azure CLI extension with unexpected name: "${extension}"`);
+  }
+
+  const env = { ...process.env, AZURE_EXTENSION_DIR: extensionDir };
+  const addCommand = `"${pythonExe}" -m azure.cli extension add -n "${extension}"`;
+  try {
+    execSync(addCommand, {
+      stdio: 'inherit',
+      env,
+    });
+  } catch (error) {
+    console.error(`  ❌ ERROR: Failed to install extension ${extension}`);
+    console.error(`     Error: ${redactCredentials(String(error))}`);
+
+    console.error(`     Re-running with --debug to capture pip's underlying error...`);
+    try {
+      // Merge stderr into stdout so the captured text has everything pip
+      // printed, regardless of which stream it used.
+      const debugOutput = execSync(`${addCommand} --debug 2>&1`, { env, encoding: 'utf-8' });
+      console.error(`     ----- --debug output (retry succeeded) -----`);
+      console.error(redactCredentials(debugOutput));
+      console.error(`     ---------------------------------------------`);
+    } catch (debugError) {
+      // execSync throws with the merged output on .stdout when the command
+      // exits non-zero; fall back to the error itself if that's not present.
+      const output = (debugError as { stdout?: string })?.stdout ?? String(debugError);
+      console.error(`     ----- --debug output -----`);
+      console.error(redactCredentials(output));
+      console.error(`     ---------------------------`);
+    }
+
+    throw error;
+  }
+}
+
+/**
  * Install Azure CLI with Python (bundled for Linux and macOS)
  */
-async function installAzCliWithPython(platform: string): Promise<void> {
+async function installAzCliWithPython(platform: string): Promise<string[]> {
   let pythonBin: string;
 
   // Download and use bundled Python for both Linux and macOS
   if (!PYTHON_URL) {
     console.error(`❌ ERROR: No Python URL configured for platform: ${platform}`);
-    console.error('   Please add python.${platform}.url to package.json config.externalTools');
+    console.error(`   Please add python.${platform}.url to package.json config.externalTools`);
     throw new Error('Python URL not configured');
   }
 
@@ -297,24 +420,18 @@ async function installAzCliWithPython(platform: string): Promise<void> {
   console.log('Installing Azure CLI packages...');
   execSync(`"${venvPip}" install azure-cli==${AZ_CLI_VERSION}`, { stdio: 'inherit' });
 
-  // Install Azure CLI extensions
+  // Install Azure CLI extensions. A failed install must abort the build
+  // rather than be swallowed: writeStagedAzCli() only runs once main()'s
+  // switch on CURRENT_PLATFORM returns successfully, so throwing here means
+  // no marker is written and the incomplete bundle can't pass as staged.
+  const installedExtensions: string[] = [];
   if (AZ_CLI_EXTENSIONS && AZ_CLI_EXTENSIONS.length > 0) {
+    logPipDiagnostics(venvPython);
     console.log(`Installing Azure CLI extensions: ${AZ_CLI_EXTENSIONS.join(', ')}`);
     for (const extension of AZ_CLI_EXTENSIONS) {
       console.log(`  → Installing extension: ${extension}`);
-      try {
-        execSync(`"${venvPython}" -m azure.cli extension add -n ${extension}`, {
-          stdio: 'inherit',
-          env: {
-            ...process.env,
-            AZURE_EXTENSION_DIR: path.join(venvDir, 'extensions')
-          }
-        });
-      } catch (error) {
-        console.error(`  ⚠️  Warning: Failed to install extension ${extension}`);
-        console.error(`     Error: ${error}`);
-        console.error(`     Continuing with remaining extensions...`);
-      }
+      addAzCliExtension(venvPython, extension, path.join(venvDir, 'extensions'));
+      installedExtensions.push(extension);
     }
     console.log('✅ Extensions installation complete');
   }
@@ -428,12 +545,14 @@ exec "$SCRIPT_DIR/python3" -m azure.cli "$@"
   }
 
   console.log(`✅ Azure CLI installed for ${platform}`);
+
+  return installedExtensions;
 }
 
 /**
  * Install Azure CLI for Windows
  */
-async function installAzCliWindows(): Promise<void> {
+async function installAzCliWindows(): Promise<string[]> {
   console.log('📦 Downloading Windows Azure CLI (ZIP)...');
   const winUrl = `https://azcliprod.blob.core.windows.net/zip/azure-cli-${AZ_CLI_VERSION}-x64.zip`;
   const winZip = path.join(TEMP_DIR, `azure-cli-${AZ_CLI_VERSION}-x64.zip`);
@@ -445,18 +564,62 @@ async function installAzCliWindows(): Promise<void> {
     throw error;
   }
 
-  // Verify checksum (optional for Azure CLI)
+  // Enforce the pinned checksum, as the Python archive path does. verifyChecksum()
+  // reports a mismatch by returning false rather than throwing, so the result has to
+  // be inspected — a try/catch around it can never fire, which previously let a
+  // corrupted or substituted archive be bundled after printing a message saying the
+  // installation would not proceed.
   if (AZ_CLI_CHECKSUM) {
-    try {
-      await verifyChecksum(winZip, AZ_CLI_CHECKSUM, `Azure CLI ${AZ_CLI_VERSION}`);
-    } catch (error) {
-      console.log('⚠️  Checksum verification failed, but continuing (Azure CLI checksums not officially published)');
+    const verified = await verifyChecksum(winZip, AZ_CLI_CHECKSUM, `Azure CLI ${AZ_CLI_VERSION}`);
+    if (!verified) {
+      throw new Error(`Azure CLI ${AZ_CLI_VERSION} checksum verification failed`);
     }
   }
 
   extractZip(winZip, TARGET_DIR);
 
+  // The zip's stock bin/az.cmd never sets AZURE_EXTENSION_DIR, so it would
+  // load whatever a user (or an older version of this app) previously
+  // installed under %USERPROFILE%\.azure\cliextensions - including a stale
+  // aks-preview that shadows core commands this bundled version added.
+  // Rename the stock script and put our own wrapper at bin/az.cmd so
+  // azCliBinaryPath() keeps resolving to the same path.
+  const binDir = path.join(TARGET_DIR, 'bin');
+  const stockAzCmd = path.join(binDir, 'az.cmd');
+  const originalAzCmd = path.join(binDir, WINDOWS_AZ_CLI_ORIGINAL_FILENAME);
+  if (!fs.existsSync(stockAzCmd)) {
+    throw new Error(
+      `Expected ${stockAzCmd} from the extracted Windows Azure CLI zip, but it was not found`
+    );
+  }
+  fs.renameSync(stockAzCmd, originalAzCmd);
+  fs.writeFileSync(stockAzCmd, generateWindowsAzWrapperScript());
+  const extensionDir = path.join(TARGET_DIR, WINDOWS_AZ_CLI_EXTENSIONS_DIRNAME);
+  fs.mkdirSync(extensionDir, { recursive: true });
+
   console.log('✅ Windows Azure CLI ready');
+
+  // Install the configured extensions into the same app-owned directory the
+  // wrapper points AZURE_EXTENSION_DIR at, using the CLI's own bundled
+  // python.exe (extracted at the top level of TARGET_DIR by the zip). A
+  // failed install must abort the build rather than be swallowed, matching
+  // installAzCliWithPython: writeStagedAzCli() only runs once main()'s
+  // switch on CURRENT_PLATFORM returns successfully, so throwing here means
+  // no marker is written and the incomplete bundle can't pass as staged.
+  const installedExtensions: string[] = [];
+  if (AZ_CLI_EXTENSIONS && AZ_CLI_EXTENSIONS.length > 0) {
+    const winPython = path.join(TARGET_DIR, 'python.exe');
+    logPipDiagnostics(winPython);
+    console.log(`Installing Azure CLI extensions: ${AZ_CLI_EXTENSIONS.join(', ')}`);
+    for (const extension of AZ_CLI_EXTENSIONS) {
+      console.log(`  → Installing extension: ${extension}`);
+      addAzCliExtension(winPython, extension, extensionDir);
+      installedExtensions.push(extension);
+    }
+    console.log('✅ Extensions installation complete');
+  }
+
+  return installedExtensions;
 }
 
 /**
@@ -464,25 +627,32 @@ async function installAzCliWindows(): Promise<void> {
  */
 async function main() {
   try {
+    let installedExtensions: string[] = [];
     switch (CURRENT_PLATFORM) {
       case 'win32':
-        await installAzCliWindows();
+        installedExtensions = await installAzCliWindows();
         break;
       case 'darwin':
         console.log('🍎 Installing macOS Azure CLI with bundled Python...');
-        await installAzCliWithPython('darwin');
+        installedExtensions = await installAzCliWithPython('darwin');
         break;
       case 'linux':
         console.log('🐧 Installing Linux Azure CLI with bundled Python...');
-        await installAzCliWithPython('linux');
+        installedExtensions = await installAzCliWithPython('linux');
         break;
     }
+
+    // Record what actually got installed, not what was requested - an
+    // extension whose install fails now aborts before reaching here (see
+    // installAzCliWithPython), but deriving the marker from the real result
+    // keeps it accurate independent of that invariant.
+    writeStagedAzCli(ROOT_DIR, CURRENT_PLATFORM, { version: AZ_CLI_VERSION, extensions: installedExtensions });
 
     // Create platform-specific README
     const readmePath = path.join(TARGET_DIR, 'README.md');
     // todo: fix this on windows
     // const dirSize = execSync(`du -sh "${TARGET_DIR}" 2>/dev/null | cut -f1`, { encoding: 'utf-8' }).trim();
-    const dirSize = 0
+    const dirSize = 0;
 
     fs.writeFileSync(readmePath, `# Azure CLI for ${CURRENT_PLATFORM}
 

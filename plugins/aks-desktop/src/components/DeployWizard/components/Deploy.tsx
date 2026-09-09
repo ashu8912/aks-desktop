@@ -1,27 +1,45 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the Apache 2.0.
 
-import MonacoEditor from '@monaco-editor/react';
-import { Box, Chip, Paper, Stack, Typography } from '@mui/material';
-import React, { useMemo } from 'react';
-import YAML from 'yaml';
+import React from 'react';
+import { useYamlObjects } from '../hooks/useYamlObjects';
+import type { QuotaWarning } from '../utils/quotaCheck';
+import DeployPure from './DeployPure';
 
+/**
+ * Props accepted by the {@link Deploy} connector component.
+ * These are forwarded to {@link DeployPure} together with the parsed
+ * `yamlObjects` computed by {@link useYamlObjects}.
+ */
 export interface DeployProps {
+  /** The selected deploy source; determines which content path is rendered. */
   sourceType: 'container' | 'yaml' | null;
+  /** Target namespace shown in the container-path subtitle. */
   namespace?: string;
+  /** Generated YAML for the container-source review editor (read-only Monaco). */
   containerPreviewYaml: string;
+  /**
+   * Namespace-overridden YAML prepared by the wizard for the YAML-source review.
+   * Takes precedence over `yamlEditorValue` when non-empty.
+   */
   userPreviewYaml: string;
+  /** Raw YAML text typed by the user; used as fallback when `userPreviewYaml` is empty. */
   yamlEditorValue: string;
+  /** Outcome of the last deploy attempt, or `null` before any attempt. */
   deployResult: 'success' | 'error' | null;
+  /** Human-readable message describing the deploy outcome. */
   deployMessage: string;
+  /** Advisory warnings when deployment resources would exceed namespace quota. */
+  quotaWarnings: QuotaWarning[];
 }
 
-interface K8sObject {
-  kind: string;
-  name: string;
-  namespace?: string;
-}
-
+/**
+ * Thin connector that wires {@link useYamlObjects} into {@link DeployPure}.
+ *
+ * Parses `userPreviewYaml`/`yamlEditorValue` into Kubernetes resource summaries
+ * and passes the result — along with all other props — to the pure presentational
+ * component so the view remains hook-free and directly story-bookable.
+ */
 export default function Deploy({
   sourceType,
   namespace,
@@ -30,132 +48,18 @@ export default function Deploy({
   yamlEditorValue,
   deployResult,
   deployMessage,
+  quotaWarnings,
 }: DeployProps) {
-  // Parse YAML to extract object summaries
-  const yamlObjects = useMemo<K8sObject[]>(() => {
-    if (sourceType !== 'yaml') return [];
-
-    try {
-      const yamlContent = userPreviewYaml || yamlEditorValue;
-      const docs = YAML.parseAllDocuments(yamlContent);
-      return docs
-        .map(doc => {
-          const obj = doc.toJSON();
-          if (!obj || !obj.kind) return null;
-          return {
-            kind: obj.kind,
-            name: obj.metadata?.name || 'unnamed',
-            namespace: obj.metadata?.namespace,
-          };
-        })
-        .filter(obj => obj !== null) as K8sObject[];
-    } catch (e) {
-      return [];
-    }
-  }, [sourceType, userPreviewYaml, yamlEditorValue]);
-
+  const yamlObjects = useYamlObjects(sourceType, userPreviewYaml, yamlEditorValue);
   return (
-    <Box>
-      <Typography variant="h6" gutterBottom>
-        Review & Deploy
-      </Typography>
-      {deployResult && (
-        <Box
-          sx={{
-            mb: 1,
-            p: 1.5,
-            border: '1px solid',
-            borderColor: deployResult === 'success' ? 'success.main' : 'error.main',
-            borderRadius: 1,
-            color: deployResult === 'success' ? 'success.main' : 'error.main',
-            backgroundColor: theme =>
-              deployResult === 'success'
-                ? theme.palette.mode === 'dark'
-                  ? 'rgba(46, 125, 50, 0.12)'
-                  : 'rgba(46, 125, 50, 0.08)'
-                : theme.palette.mode === 'dark'
-                ? 'rgba(211, 47, 47, 0.12)'
-                : 'rgba(211, 47, 47, 0.08)',
-          }}
-        >
-          {deployMessage}
-        </Box>
-      )}
-      {sourceType === 'container' ? (
-        <>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            Generated Kubernetes manifests (namespace: {namespace || 'default'})
-          </Typography>
-          <Box
-            sx={{
-              border: '1px solid',
-              borderColor: 'divider',
-              borderRadius: 1,
-              overflow: 'hidden',
-            }}
-          >
-            <MonacoEditor
-              height="60vh"
-              language="yaml"
-              value={containerPreviewYaml}
-              onChange={() => {}}
-              options={{
-                readOnly: true,
-                minimap: { enabled: false },
-                wordWrap: 'on',
-                fontSize: 13,
-                lineNumbers: 'on',
-                scrollBeyondLastLine: false,
-                renderWhitespace: 'selection',
-                automaticLayout: true,
-              }}
-            />
-          </Box>
-        </>
-      ) : (
-        <>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Resources to be deployed ({yamlObjects.length} object
-            {yamlObjects.length !== 1 ? 's' : ''})
-          </Typography>
-          <Stack spacing={1.5}>
-            {yamlObjects.map((obj, index) => (
-              <Paper
-                key={index}
-                variant="outlined"
-                sx={{
-                  p: 2,
-                  borderRadius: 1,
-                  '&:hover': {
-                    borderColor: 'primary.main',
-                    backgroundColor: 'action.hover',
-                  },
-                }}
-              >
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                  <Chip
-                    label={obj.kind}
-                    size="small"
-                    color="primary"
-                    sx={{ fontWeight: 600, minWidth: 120 }}
-                  />
-                  <Typography variant="body1" sx={{ fontWeight: 500, flex: 1 }}>
-                    {obj.name}
-                  </Typography>
-                  {obj.namespace && (
-                    <Chip
-                      label={`namespace: ${obj.namespace}`}
-                      size="small"
-                      variant="outlined"
-                      sx={{ fontSize: '0.75rem' }}
-                    />
-                  )}
-                </Box>
-              </Paper>
-            ))}
-          </Stack>
-        </>
-      )}
-    </Box>
+    <DeployPure
+      sourceType={sourceType}
+      namespace={namespace}
+      containerPreviewYaml={containerPreviewYaml}
+      deployResult={deployResult}
+      deployMessage={deployMessage}
+      yamlObjects={yamlObjects}
+      quotaWarnings={quotaWarnings}
+    />
   );
 }

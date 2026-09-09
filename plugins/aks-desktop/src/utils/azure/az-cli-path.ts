@@ -34,20 +34,20 @@ function getPlatform(): string {
  */
 export function getBundledAzPath(): string | null {
   if (!isElectron()) {
-    console.log('[AZ-CLI] Not running in Electron');
+    console.debug('[AZ-CLI] Not running in Electron');
     return null;
   }
 
   try {
     const platform = getPlatform();
-    console.log('[AZ-CLI] Platform detected:', platform);
+    console.debug('[AZ-CLI] Platform detected:', platform);
 
     // Get resources path from Electron
     // In production: process.resourcesPath
     // In development: we won't have bundled CLI
     if (typeof process !== 'undefined' && (process as any).resourcesPath) {
       const resourcesPath = (process as any).resourcesPath;
-      console.log('[AZ-CLI] Resources path:', resourcesPath);
+      console.debug('[AZ-CLI] Resources path:', resourcesPath);
 
       let fs: any = null;
       try {
@@ -61,9 +61,9 @@ export function getBundledAzPath(): string | null {
       if (platform === 'win32') {
         // Windows: Use .cmd wrapper
         const azPath = `${resourcesPath}/az-cli/bin/az.cmd`;
-        console.log('[AZ-CLI] Checking bundled Windows path:', azPath);
+        console.debug('[AZ-CLI] Checking bundled Windows path:', azPath);
         if (fs && fs.existsSync(azPath)) {
-          console.log('[AZ-CLI] ✅ Found bundled Windows Azure CLI');
+          console.debug('[AZ-CLI] ✅ Found bundled Windows Azure CLI');
           return azPath;
         } else {
           console.warn('[AZ-CLI] ❌ Bundled Windows Azure CLI not found at:', azPath);
@@ -73,14 +73,14 @@ export function getBundledAzPath(): string | null {
         const wrapperPath = `${resourcesPath}/az-cli/bin/az-wrapper`;
         const directPath = `${resourcesPath}/az-cli/bin/az`;
 
-        console.log('[AZ-CLI] Checking bundled macOS paths:', { wrapperPath, directPath });
+        console.debug('[AZ-CLI] Checking bundled macOS paths:', { wrapperPath, directPath });
 
         if (fs) {
           if (fs.existsSync(wrapperPath)) {
-            console.log('[AZ-CLI] ✅ Found bundled macOS portable install (wrapper)');
+            console.debug('[AZ-CLI] ✅ Found bundled macOS portable install (wrapper)');
             return wrapperPath;
           } else if (fs.existsSync(directPath)) {
-            console.log('[AZ-CLI] ✅ Found bundled macOS binary (direct)');
+            console.debug('[AZ-CLI] ✅ Found bundled macOS binary (direct)');
             return directPath;
           } else {
             console.warn(
@@ -92,7 +92,7 @@ export function getBundledAzPath(): string | null {
           }
         } else {
           // No fs available, return wrapper path and hope it exists
-          console.log('[AZ-CLI] No fs module, returning wrapper path');
+          console.debug('[AZ-CLI] No fs module, returning wrapper path');
           return wrapperPath;
         }
       } else if (platform === 'linux') {
@@ -100,14 +100,14 @@ export function getBundledAzPath(): string | null {
         const wrapperPath = `${resourcesPath}/az-cli/bin/az-wrapper`;
         const directPath = `${resourcesPath}/az-cli/bin/az`;
 
-        console.log('[AZ-CLI] Checking bundled Linux paths:', { wrapperPath, directPath });
+        console.debug('[AZ-CLI] Checking bundled Linux paths:', { wrapperPath, directPath });
 
         if (fs) {
           if (fs.existsSync(wrapperPath)) {
-            console.log('[AZ-CLI] ✅ Found bundled Linux portable install (wrapper)');
+            console.debug('[AZ-CLI] ✅ Found bundled Linux portable install (wrapper)');
             return wrapperPath;
           } else if (fs.existsSync(directPath)) {
-            console.log('[AZ-CLI] ✅ Found bundled Linux binary (direct)');
+            console.debug('[AZ-CLI] ✅ Found bundled Linux binary (direct)');
             return directPath;
           } else {
             console.warn(
@@ -119,7 +119,7 @@ export function getBundledAzPath(): string | null {
           }
         } else {
           // No fs available, return wrapper path and hope it exists
-          console.log('[AZ-CLI] No fs module, returning wrapper path');
+          console.debug('[AZ-CLI] No fs module, returning wrapper path');
           return wrapperPath;
         }
       }
@@ -130,7 +130,7 @@ export function getBundledAzPath(): string | null {
     console.error('[AZ-CLI] Error detecting bundled path:', error);
   }
 
-  console.log('[AZ-CLI] No bundled Azure CLI found, will fall back to system CLI');
+  console.debug('[AZ-CLI] No bundled Azure CLI found, will fall back to system CLI');
   return null;
 }
 
@@ -146,14 +146,6 @@ export function getAzCommand(): string {
   // The Electron main process has already added az-cli/bin to PATH
   // So we can just return 'az' and it will use the bundled version
   return 'az';
-}
-
-/**
- * Check if we should use the bundled CLI
- * @returns true if bundled CLI is available and should be used
- */
-export function shouldUseBundledCli(): boolean {
-  return getBundledAzPath() !== null;
 }
 
 /**

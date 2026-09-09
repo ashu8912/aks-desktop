@@ -1,88 +1,109 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the Apache 2.0.
 
-import { K8s } from '@kinvolk/headlamp-plugin/lib';
+import { K8s, useTranslation } from '@kinvolk/headlamp-plugin/lib';
 import { useEffect, useState } from 'react';
 
-export interface Deployment {
+/**
+ * Represents a Kubernetes deployment and its replica status.
+ */
+export interface DeploymentInfo {
+  /** Name of the deployment. */
   name: string;
+  /** Kubernetes namespace where the deployment resides. */
   namespace: string;
+  /** Desired number of replicas. */
   replicas: number;
+  /** Number of replicas that have passed availability checks. */
   availableReplicas: number;
+  /** Number of replicas that are ready to serve traffic. */
   readyReplicas: number;
 }
 
+/**
+ * Return type for the {@link useDeployments} hook.
+ */
 interface UseDeploymentsResult {
-  deployments: Deployment[];
+  /** List of deployments in the namespace. */
+  deployments: DeploymentInfo[];
+  /** Currently selected deployment name. */
   selectedDeployment: string;
+  /** Whether deployments are being fetched. */
   loading: boolean;
+  /** Error message if fetch failed, otherwise null. */
   error: string | null;
+  /** Updates the selected deployment. */
   setSelectedDeployment: (deployment: string) => void;
 }
 
 /**
- * Custom hook to fetch and manage Kubernetes deployments for a project
+ * Fetches and manages Kubernetes deployments for a namespace.
+ *
+ * @param namespace - The Kubernetes namespace to fetch deployments from.
+ * @param cluster - The cluster identifier.
+ * @returns Deployment list, selection state, loading/error status, and a setter.
  */
 export const useDeployments = (
   namespace: string | undefined,
   cluster: string | undefined
 ): UseDeploymentsResult => {
+  const { t } = useTranslation();
   const [selectedDeployment, setSelectedDeployment] = useState<string>('');
-  const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [deployments, setDeployments] = useState<DeploymentInfo[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!namespace) return;
+    if (!namespace) {
+      return;
+    }
 
     setLoading(true);
     setError(null);
 
-    try {
-      // Use Headlamp's K8s API to fetch deployments
-      const cancel = K8s.ResourceClasses.Deployment.apiList(
-        (deploymentList: K8s.Deployment[]) => {
-          const fetchedDeployments = deploymentList
-            .filter((deployment: K8s.Deployment) => deployment.getNamespace() === namespace)
-            .map((deployment: K8s.Deployment) => ({
-              name: deployment.getName(),
-              namespace: deployment.getNamespace(),
-              replicas: deployment.spec?.replicas || 0,
-              availableReplicas: deployment.status?.availableReplicas || 0,
-              readyReplicas: deployment.status?.readyReplicas || 0,
-            }));
+    // Use Headlamp's K8s API to fetch deployments
+    // @ts-expect-error Headlamp apiList returns a callable runner at runtime.
+    const runWatcher = K8s.ResourceClasses.Deployment.apiList(
+      deploymentList => {
+        const fetchedDeployments = deploymentList
+          .filter(deployment => deployment.getNamespace() === namespace)
+          .map(deployment => ({
+            name: deployment.getName(),
+            namespace: deployment.getNamespace(),
+            replicas: deployment.spec?.replicas || 0,
+            availableReplicas: deployment.status?.availableReplicas || 0,
+            readyReplicas: deployment.status?.readyReplicas || 0,
+          }));
 
-          setDeployments(fetchedDeployments);
+        setDeployments(fetchedDeployments);
 
-          // Auto-select first deployment if none selected
-          setSelectedDeployment(current => {
-            if (!current && fetchedDeployments.length > 0) {
-              return fetchedDeployments[0].name;
-            }
-            return current;
-          });
-          setLoading(false);
-        },
-        (error: any) => {
-          console.error('Error fetching deployments:', error);
-          setError('Failed to fetch deployments');
-          setDeployments([]);
-          setLoading(false);
-        },
-        {
-          namespace,
-          cluster,
-        }
-      )();
+        // Auto-select first deployment if none selected
+        setSelectedDeployment(current => {
+          if (!current && fetchedDeployments.length > 0) {
+            return fetchedDeployments[0].name;
+          }
+          return current;
+        });
+        setLoading(false);
+      },
+      (error: any) => {
+        console.error('Error fetching deployments:', error);
+        setError(t('Failed to fetch deployments'));
+        setDeployments([]);
+        setLoading(false);
+      },
+      {
+        namespace,
+        cluster,
+      }
+    ) as () => void | (() => void);
 
-      // Return cleanup function
-      return cancel;
-    } catch (err) {
-      console.error('Error in fetchDeployments:', err);
-      setError('Failed to fetch deployments');
-      setLoading(false);
-      return undefined;
+    const unsubscribe = runWatcher();
+    if (typeof unsubscribe === 'function') {
+      return unsubscribe;
     }
+
+    return;
   }, [namespace, cluster]);
 
   return {

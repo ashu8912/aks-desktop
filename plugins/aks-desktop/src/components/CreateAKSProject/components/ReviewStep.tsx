@@ -2,6 +2,7 @@
 // Licensed under the Apache 2.0.
 
 import { Icon } from '@iconify/react';
+import { useTranslation } from '@kinvolk/headlamp-plugin/lib';
 import { Box, Card, Grid, Typography } from '@mui/material';
 import React from 'react';
 import type { ReviewStepProps } from '../types';
@@ -11,8 +12,11 @@ import { formatCpuValue, formatMemoryValue } from '../validators';
  * Review step component for displaying configuration summary
  */
 export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions, clusters }) => {
+  const { t } = useTranslation();
   const selectedSubscription = subscriptions.find(sub => sub.id === formData.subscription);
-  const selectedCluster = clusters.find(c => c.name === formData.cluster);
+  const selectedCluster = clusters.find(
+    c => c.name === formData.cluster && c.resourceGroup === formData.resourceGroup
+  );
 
   const sectionTitleSx = { color: 'text.primary' };
   const sectionDescriptionSx = { mb: 2, color: 'text.secondary' };
@@ -20,36 +24,43 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
   return (
     <Box>
       <Typography variant="h5" component="h2" gutterBottom sx={sectionTitleSx}>
-        Review Project Configuration
+        {t('Review Project Configuration')}
       </Typography>
       <Typography variant="body2" sx={sectionDescriptionSx}>
-        Please review all the settings before creating your AKS project
+        {t('Please review all the settings before creating your AKS project')}
       </Typography>
 
       <Grid container spacing={3}>
         {/* Basics Section */}
         <Grid item xs={12}>
           <Card variant="outlined" sx={{ p: 2, mb: 2 }}>
-            <Typography variant="h6" gutterBottom sx={sectionTitleSx}>
-              <Icon icon="mdi:project" style={{ marginRight: 8, verticalAlign: 'middle' }} />
-              Project Basics
+            <Typography variant="h6" component="h3" gutterBottom sx={sectionTitleSx}>
+              {/* aria-hidden: decorative section icon — the adjacent heading text already
+                  conveys the section name to screen readers.
+                  MDN: https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-hidden */}
+              <Icon
+                icon="mdi:project"
+                aria-hidden="true"
+                style={{ marginRight: 8, verticalAlign: 'middle' }}
+              />
+              {t('Project Basics')}
             </Typography>
             <Grid container spacing={2}>
               <Grid item xs={12} md={6}>
                 <Typography variant="body2" color="text.secondary">
-                  Project Name:
+                  {t('Project Name')}:
                 </Typography>
                 <Typography variant="body1">{formData.projectName}</Typography>
               </Grid>
               <Grid item xs={12} md={6}>
                 <Typography variant="body2" color="text.secondary">
-                  Subscription:
+                  {t('Subscription')}:
                 </Typography>
                 <Typography variant="body1">{selectedSubscription?.name || 'N/A'}</Typography>
               </Grid>
               <Grid item xs={12} md={6}>
                 <Typography variant="body2" color="text.secondary">
-                  Cluster:
+                  {t('Cluster')}:
                 </Typography>
                 <Typography variant="body1">
                   {selectedCluster
@@ -59,10 +70,10 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
               </Grid>
               <Grid item xs={12} md={6}>
                 <Typography variant="body2" color="text.secondary">
-                  Description:
+                  {t('Description')}:
                 </Typography>
                 <Typography variant="body1">
-                  {formData.description || 'No description provided'}
+                  {formData.description || t('No description provided')}
                 </Typography>
               </Grid>
             </Grid>
@@ -72,20 +83,26 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
         {/* Networking and Compute Quota Side by Side */}
         <Grid item xs={12} md={6}>
           <Card variant="outlined" sx={{ p: 2, mb: 2, height: '200px' }}>
-            <Typography variant="h6" gutterBottom sx={sectionTitleSx}>
-              <Icon icon="mdi:network" style={{ marginRight: 8, verticalAlign: 'middle' }} />
-              Networking Policies
+            <Typography variant="h6" component="h3" gutterBottom sx={sectionTitleSx}>
+              {/* aria-hidden: decorative section icon — see comment on "Project Basics" above.
+                  MDN: https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-hidden */}
+              <Icon
+                icon="mdi:network"
+                aria-hidden="true"
+                style={{ marginRight: 8, verticalAlign: 'middle' }}
+              />
+              {t('Networking Policies')}
             </Typography>
             <Grid container spacing={2}>
               <Grid item xs={12}>
                 <Typography variant="body2" color="text.secondary">
-                  Ingress Policy:
+                  {t('Ingress Policy')}:
                 </Typography>
                 <Typography variant="body1">{formData.ingress}</Typography>
               </Grid>
               <Grid item xs={12}>
                 <Typography variant="body2" color="text.secondary">
-                  Egress Policy:
+                  {t('Egress Policy')}:
                 </Typography>
                 <Typography variant="body1">{formData.egress}</Typography>
               </Grid>
@@ -95,9 +112,15 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
 
         <Grid item xs={12} md={6}>
           <Card variant="outlined" sx={{ p: 2, mb: 2, height: '200px' }}>
-            <Typography variant="h6" gutterBottom sx={sectionTitleSx}>
-              <Icon icon="mdi:cpu-64-bit" style={{ marginRight: 8, verticalAlign: 'middle' }} />
-              Compute Quota
+            <Typography variant="h6" component="h3" gutterBottom sx={sectionTitleSx}>
+              {/* aria-hidden: decorative section icon — see comment on "Project Basics" above.
+                  MDN: https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-hidden */}
+              <Icon
+                icon="mdi:cpu-64-bit"
+                aria-hidden="true"
+                style={{ marginRight: 8, verticalAlign: 'middle' }}
+              />
+              {t('Compute Quota')}
             </Typography>
             <Grid container spacing={2}>
               {/* CPU Section */}
@@ -105,6 +128,7 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
                 <Box
                   sx={theme => ({
                     p: 1,
+                    // @ts-ignore todo: fix palette type so background.muted is recognized
                     backgroundColor: theme.palette.background.muted,
                     borderRadius: 1,
                     border: `1px solid ${theme.palette.divider}`,
@@ -115,15 +139,21 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
                     color="text.secondary"
                     sx={{ fontWeight: 'bold', display: 'flex', alignItems: 'center' }}
                   >
-                    <Icon icon="mdi:cpu-64-bit" style={{ marginRight: 4, fontSize: 16 }} />
-                    CPU
+                    {/* aria-hidden: decorative inline icon — see comment on "Project Basics" above.
+                        MDN: https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-hidden */}
+                    <Icon
+                      icon="mdi:cpu-64-bit"
+                      aria-hidden="true"
+                      style={{ marginRight: 4, fontSize: 16 }}
+                    />
+                    {t('CPU')}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Requests:
+                    {t('Requests')}:
                   </Typography>
                   <Typography variant="body1">{formatCpuValue(formData.cpuRequest)}</Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Limits:
+                    {t('Limits')}:
                   </Typography>
                   <Typography variant="body1">{formatCpuValue(formData.cpuLimit)}</Typography>
                 </Box>
@@ -134,6 +164,7 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
                 <Box
                   sx={theme => ({
                     p: 1,
+                    // @ts-ignore todo: fix palette type so background.muted is recognized
                     backgroundColor: theme.palette.background.muted,
                     borderRadius: 1,
                     border: `1px solid ${theme.palette.divider}`,
@@ -144,17 +175,23 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
                     color="text.secondary"
                     sx={{ fontWeight: 'bold', display: 'flex', alignItems: 'center' }}
                   >
-                    <Icon icon="mdi:memory" style={{ marginRight: 4, fontSize: 16 }} />
-                    Memory
+                    {/* aria-hidden: decorative inline icon — see comment on "Project Basics" above.
+                        MDN: https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-hidden */}
+                    <Icon
+                      icon="mdi:memory"
+                      aria-hidden="true"
+                      style={{ marginRight: 4, fontSize: 16 }}
+                    />
+                    {t('Memory')}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Requests:
+                    {t('Requests')}:
                   </Typography>
                   <Typography variant="body1">
                     {formatMemoryValue(formData.memoryRequest)}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Limits:
+                    {t('Limits')}:
                   </Typography>
                   <Typography variant="body1">{formatMemoryValue(formData.memoryLimit)}</Typography>
                 </Box>
@@ -166,12 +203,38 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
         {/* Access Section with Scroll */}
         <Grid item xs={12}>
           <Card variant="outlined" sx={{ p: 2, mb: 2 }}>
-            <Typography variant="h6" gutterBottom sx={sectionTitleSx}>
-              <Icon icon="mdi:account-group" style={{ marginRight: 8, verticalAlign: 'middle' }} />
-              Access Control ({formData.userAssignments.length} assignee
-              {formData.userAssignments.length !== 1 ? 's' : ''})
+            <Typography
+              id="aksd-review-access-heading"
+              variant="h6"
+              component="h3"
+              gutterBottom
+              sx={sectionTitleSx}
+            >
+              {/* aria-hidden: decorative section icon — see comment on "Project Basics" above.
+                  MDN: https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Attributes/aria-hidden */}
+              <Icon
+                icon="mdi:account-group"
+                aria-hidden="true"
+                style={{ marginRight: 8, verticalAlign: 'middle' }}
+              />
+              {t('Access Control ({{count}} assignee)', {
+                count: formData.userAssignments.length,
+              })}
             </Typography>
+            {/* tabIndex={0} satisfies the scrollable-region-focusable axe rule (WCAG 2.1.1):
+                keyboard users must be able to reach scrollable regions that may contain
+                content not visible in the viewport.
+                role="region" + aria-labelledby give this container an accessible name so AT
+                announces it as a named landmark (e.g. "Access Control (2 assignee), region")
+                instead of an unnamed group.  aria-labelledby is preferred over aria-label
+                because it reuses the existing heading text, keeping the announced name
+                consistent with what sighted users see.
+                MDN: https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Reference/Roles/region_role
+                Deque: https://dequeuniversity.com/rules/axe/4.11/scrollable-region-focusable */}
             <Box
+              tabIndex={0}
+              role="region"
+              aria-labelledby="aksd-review-access-heading"
               sx={{
                 maxHeight: '200px',
                 overflowY: 'auto',
@@ -186,19 +249,22 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ formData, subscriptions,
                   sx={theme => ({
                     mb: 2,
                     p: 1,
+                    // @ts-ignore todo: fix palette type so background.muted is recognized
                     backgroundColor: theme.palette.background.muted,
                     borderRadius: 1,
                     border: `1px solid ${theme.palette.divider}`,
                   })}
                 >
                   <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 'bold' }}>
-                    Assignee {idx + 1}:
+                    {`${t('Assignee')} ${idx + 1}`}:
                   </Typography>
                   <Typography variant="body1" sx={{ mb: 1 }}>
-                    {assignment.email || 'Not specified'}
+                    {assignment.displayName
+                      ? `${assignment.displayName} (${assignment.objectId})`
+                      : assignment.objectId || t('Not specified')}
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 'bold' }}>
-                    Role:
+                    {t('Role')}:
                   </Typography>
                   <Typography variant="body1">{assignment.role}</Typography>
                 </Box>

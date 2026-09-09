@@ -2,56 +2,28 @@
 // Licensed under the Apache 2.0.
 
 /**
- * Azure CLI utilities test - compatible with both Jest and manual execution
+ * Azure CLI utilities test - Vitest compatible
  */
 
-// Define types for mock functions
+import { beforeEach, describe, expect, test, vi } from 'vitest';
+
 interface MockChildProcess {
   stdout: {
-    on: (event: string, callback: (data: string) => void) => void;
+    on: ReturnType<typeof vi.fn>;
   };
   stderr: {
-    on: (event: string, callback: (data: string) => void) => void;
+    on: ReturnType<typeof vi.fn>;
   };
-  on: (event: string, callback: () => void) => void;
-}
-
-interface MockRunCommand {
-  (...args: any[]): MockChildProcess;
-  mockReturnValue?: (value: MockChildProcess) => MockRunCommand;
-  mockClear?: () => void;
-  _mockReturnValue?: MockChildProcess;
-}
-
-interface TestCase {
-  name: string;
-  fn: () => Promise<void>;
+  on: ReturnType<typeof vi.fn>;
 }
 
 // Mock the headlamp plugin
-const mockRunCommand: MockRunCommand =
-  typeof jest !== 'undefined' && jest.fn
-    ? jest.fn()
-    : (() => {
-        let calls: any[] = [];
-        const fn = (...args: any[]) => {
-          calls.push(args);
-          return fn._mockReturnValue!;
-        };
-        fn._mockReturnValue = {
-          stdout: { on: () => {} },
-          stderr: { on: () => {} },
-          on: () => {},
-        } as MockChildProcess;
-        fn.mockReturnValue = (value: MockChildProcess) => {
-          fn._mockReturnValue = value;
-          return fn;
-        };
-        fn.mockClear = () => {
-          calls = [];
-        };
-        return fn as MockRunCommand;
-      })();
+const mockRunCommand = vi.hoisted(() => vi.fn());
+
+// Mock the headlamp plugin module
+vi.mock('@kinvolk/headlamp-plugin/lib', () => ({
+  runCommand: mockRunCommand,
+}));
 
 // Mock Azure CLI functions
 const mockAzCliFunctions = {
@@ -96,170 +68,62 @@ const { isAzCliInstalled, isAzCliLoggedIn } = mockAzCliFunctions;
 // Test helper function
 const createMockChildProcess = (stdoutData: string, stderrData: string = ''): MockChildProcess => ({
   stdout: {
-    on: (event: string, callback: (data: string) => void) => {
+    on: vi.fn((event: string, callback: (data: string) => void) => {
       if (event === 'data') {
         callback(stdoutData);
       }
-    },
+    }),
   },
   stderr: {
-    on: (event: string, callback: (data: string) => void) => {
+    on: vi.fn((event: string, callback: (data: string) => void) => {
       if (event === 'data') {
         callback(stderrData);
       }
-    },
+    }),
   },
-  on: (event: string, callback: () => void) => {
+  on: vi.fn((event: string, callback: () => void) => {
     if (event === 'exit') {
       callback();
     }
-  },
+  }),
 });
 
-// Jest test suite
-if (typeof describe === 'function' && typeof test === 'function') {
-  describe('Azure CLI Utilities', () => {
-    beforeEach(() => {
-      if (mockRunCommand.mockClear) {
-        mockRunCommand.mockClear();
-      }
-    });
-
-    test('should return true when az CLI is installed', async () => {
-      const mockChildProcess = createMockChildProcess('azure-cli                         2.59.0\n');
-      mockRunCommand.mockReturnValue!(mockChildProcess);
-
-      const result = await isAzCliInstalled();
-      expect(result).toBe(true);
-    });
-
-    test('should return false when az CLI is not installed', async () => {
-      const mockChildProcess = createMockChildProcess('');
-      mockRunCommand.mockReturnValue!(mockChildProcess);
-
-      const result = await isAzCliInstalled();
-      expect(result).toBe(false);
-    });
-
-    test('should return true when user is logged in', async () => {
-      const mockChildProcess = createMockChildProcess('user@example.com');
-      mockRunCommand.mockReturnValue!(mockChildProcess);
-
-      const result = await isAzCliLoggedIn();
-      expect(result).toBe(true);
-    });
-
-    test('should return false when user is not logged in', async () => {
-      const mockChildProcess = createMockChildProcess('', 'Please run "az login" to setup account');
-      mockRunCommand.mockReturnValue!(mockChildProcess);
-
-      const result = await isAzCliLoggedIn();
-      expect(result).toBe(false);
-    });
-  });
-}
-
-// Manual test runner for non-Jest environments
-if (typeof describe === 'undefined') {
-  const simpleExpect = (actual: any): SimpleExpected => ({
-    toBe: (expected: any) => {
-      if (actual !== expected) {
-        throw new Error(`Expected ${actual} to be ${expected}`);
-      }
-    },
+describe('Azure CLI Utilities', () => {
+  beforeEach(() => {
+    mockRunCommand.mockClear();
   });
 
-  interface SimpleExpected {
-    toBe: (expected: any) => void;
-  }
+  test('should return true when az CLI is installed', async () => {
+    const mockChildProcess = createMockChildProcess('azure-cli                         2.59.0\n');
+    mockRunCommand.mockReturnValue(mockChildProcess);
 
-  const tests: TestCase[] = [
-    {
-      name: 'should return true when az CLI is installed',
-      fn: async () => {
-        const mockChildProcess = createMockChildProcess(
-          'azure-cli                         2.59.0\n'
-        );
-        mockRunCommand.mockReturnValue!(mockChildProcess);
+    const result = await isAzCliInstalled();
+    expect(result).toBe(true);
+  });
 
-        const result = await isAzCliInstalled();
-        simpleExpect(result).toBe(true);
-      },
-    },
-    {
-      name: 'should return false when az CLI is not installed',
-      fn: async () => {
-        const mockChildProcess = createMockChildProcess('');
-        mockRunCommand.mockReturnValue!(mockChildProcess);
+  test('should return false when az CLI is not installed', async () => {
+    const mockChildProcess = createMockChildProcess('');
+    mockRunCommand.mockReturnValue(mockChildProcess);
 
-        const result = await isAzCliInstalled();
-        simpleExpect(result).toBe(false);
-      },
-    },
-    {
-      name: 'should return true when user is logged in',
-      fn: async () => {
-        const mockChildProcess = createMockChildProcess('user@example.com');
-        mockRunCommand.mockReturnValue!(mockChildProcess);
+    const result = await isAzCliInstalled();
+    expect(result).toBe(false);
+  });
 
-        const result = await isAzCliLoggedIn();
-        simpleExpect(result).toBe(true);
-      },
-    },
-    {
-      name: 'should return false when user is not logged in',
-      fn: async () => {
-        const mockChildProcess = createMockChildProcess(
-          '',
-          'Please run "az login" to setup account'
-        );
-        mockRunCommand.mockReturnValue!(mockChildProcess);
+  test('should return true when user is logged in', async () => {
+    const mockChildProcess = createMockChildProcess('user@example.com');
+    mockRunCommand.mockReturnValue(mockChildProcess);
 
-        const result = await isAzCliLoggedIn();
-        simpleExpect(result).toBe(false);
-      },
-    },
-  ];
+    const result = await isAzCliLoggedIn();
+    expect(result).toBe(true);
+  });
 
-  async function runTests(): Promise<void> {
-    console.log('Running Azure CLI utility tests...\n');
+  test('should return false when user is not logged in', async () => {
+    const mockChildProcess = createMockChildProcess('', 'Please run "az login" to setup account');
+    mockRunCommand.mockReturnValue(mockChildProcess);
 
-    let passed = 0;
-    let failed = 0;
+    const result = await isAzCliLoggedIn();
+    expect(result).toBe(false);
+  });
+});
 
-    for (const test of tests) {
-      try {
-        if (mockRunCommand.mockClear) {
-          mockRunCommand.mockClear();
-        }
-        await test.fn();
-        console.log(`    ✓ ${test.name}`);
-        passed++;
-      } catch (error) {
-        console.log(`    ✗ ${test.name}`);
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.log(`      Error: ${errorMessage}`);
-        failed++;
-      }
-    }
-
-    console.log(`\n📊 Test Results:`);
-    console.log(`✅ Passed: ${passed}`);
-    console.log(`❌ Failed: ${failed}`);
-    console.log(`📈 Success Rate: ${((passed / (passed + failed)) * 100).toFixed(1)}%`);
-
-    if (failed > 0) {
-      process.exit(1);
-    }
-  }
-
-  // Auto-run if this file is executed directly
-  if (typeof require !== 'undefined' && require.main === module) {
-    runTests();
-  }
-}
-
-// Export for Jest if available
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { isAzCliInstalled, isAzCliLoggedIn };
-}
+export { isAzCliInstalled, isAzCliLoggedIn };

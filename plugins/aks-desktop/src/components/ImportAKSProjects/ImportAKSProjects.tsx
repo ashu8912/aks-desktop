@@ -1,286 +1,428 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the Apache 2.0.
+
 import { Icon } from '@iconify/react';
-import { PageGrid, SectionBox } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
-// @ts-ignore
-import { useClustersConf } from '@kinvolk/headlamp-plugin/lib/K8s';
-import {
-  Alert,
-  Autocomplete,
-  Box,
-  Button,
-  Card,
-  CardContent,
-  Checkbox,
-  CircularProgress,
-  FormControlLabel,
-  TextField,
-  Typography,
-} from '@mui/material';
-import React, { useEffect, useState } from 'react';
+import { useTranslation } from '@kinvolk/headlamp-plugin/lib';
+import { PageGrid, SectionBox, Table } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
+import { Alert, Box, Button, Checkbox, Chip, CircularProgress, Typography } from '@mui/material';
+import React, { useEffect, useRef, useState } from 'react';
 import { useHistory } from 'react-router-dom';
-import { useAzureAuth } from '../../hooks/useAzureAuth';
-import { getSubscriptions, registerAKSCluster } from '../../utils/azure/aks';
-import {
-  getManagedNamespaceDetails,
-  getManagedNamespacesForSubscription,
-} from '../../utils/azure/az-cli';
+import { DiscoveredNamespace, useNamespaceDiscovery } from '../../hooks/useNamespaceDiscovery';
+import { useRegisteredClusters } from '../../hooks/useRegisteredClusters';
+import { trackError, trackFeature } from '../../telemetry';
+import { registerAKSCluster } from '../../utils/azure/aks';
+import { normalizeClusterName } from '../../utils/kubernetes/k8sNames';
+import { applyProjectLabels } from '../../utils/kubernetes/namespaceUtils';
+import { getClusterSettings, setClusterSettings } from '../../utils/shared/clusterSettings';
 import AzureAuthGuard from '../AzureAuth/AzureAuthGuard';
-import AzureCliWarning from '../AzureCliWarning';
-
-// Project label constants
-const PROJECT_ID_LABEL = 'headlamp.dev/project-id';
-const PROJECT_MANAGED_BY_LABEL = 'headlamp.dev/project-managed-by';
-const PROJECT_MANAGED_BY_AKS_DESKTOP = 'aks-desktop';
-
-interface Subscription {
-  id: string;
-  name: string;
-  state: string;
-}
-
-interface ManagedNamespace {
-  name: string;
-  clusterName: string;
-  resourceGroup: string;
-  subscriptionId: string;
-}
+import { ConversionDialog } from './components/ConversionDialog';
 
 interface ImportSelection {
-  namespace: ManagedNamespace;
-  projectName: string;
+  namespace: DiscoveredNamespace;
   selected: boolean;
-  clusterMerged: boolean; // Track if cluster is already in kubeconfig
 }
 
-export default function ImportAKSProjects() {
+/**
+ * Builds a stable selection identity across Azure scope, cluster, and namespace.
+ *
+ * @param namespace - Discovered namespace whose selection key is required.
+ * @returns A null-delimited identity that remains unique across same-name resources.
+ */
+function namespaceSelectionKey(namespace: DiscoveredNamespace): string {
+  return [
+    namespace.subscriptionId,
+    namespace.resourceGroup,
+    namespace.clusterName,
+    namespace.name,
+  ].join('\0');
+}
+
+function safelyTrackFeature(properties: Parameters<typeof trackFeature>[0]) {
+  try {
+    trackFeature(properties);
+  } catch {}
+}
+
+function safelyTrackError(properties: Parameters<typeof trackError>[0]) {
+  try {
+    trackError(properties);
+  } catch {}
+}
+
+function ImportAKSProjectsContent() {
   const history = useHistory();
-  const authStatus = useAzureAuth();
-  const clustersConf = useClustersConf(); // Get currently merged clusters
+  const { t } = useTranslation();
+  const { registeredClusters, isReady: registeredClustersReady } = useRegisteredClusters();
+  const terminalTrackedRef = useRef(false);
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  // Step 1: Select subscription
-  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
-  const [loadingSubscriptions, setLoadingSubscriptions] = useState(false);
-  const [selectedSubscription, setSelectedSubscription] = useState<Subscription | null>(null);
+  // Discovery
+  const {
+    namespaces: discovered,
+    loading: loadingNamespaces,
+    error: discoveryError,
+    refresh,
+  } = useNamespaceDiscovery();
 
-  // Step 2: Discover and select namespaces (auto-discovered from subscription)
-  const [namespaces, setNamespaces] = useState<ImportSelection[]>([]);
-  const [loadingNamespaces, setLoadingNamespaces] = useState(false);
-  const [discoveryProgress, setDiscoveryProgress] = useState('');
+  // Allow user to dismiss discoveryError
+  const [dismissedDiscoveryError, setDismissedDiscoveryError] = useState(false);
+  useEffect(() => {
+    setDismissedDiscoveryError(false);
+  }, [discoveryError]);
 
-  // Step 3: Import
+  // Selection state layered on top of discovered namespaces
+  const [selections, setSelections] = useState<Set<string>>(new Set());
+
+  // Derive selectable list from discovered namespaces
+  const namespaces: ImportSelection[] = discovered.map(ns => ({
+    namespace: ns,
+    selected: selections.has(namespaceSelectionKey(ns)),
+  }));
+
+  const selectedNamespaces = namespaces.filter(ns => ns.selected);
+  const selectedCount = selectedNamespaces.length;
+
+  // Conversion dialog
+  const [showConversionDialog, setShowConversionDialog] = useState(false);
+
+  // Import state
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState('');
   const [importResults, setImportResults] = useState<
-    Array<{ namespace: string; success: boolean; message: string }>
-  >([]);
+    Array<{ namespace: string; clusterName: string; success: boolean; message: string }> | undefined
+  >();
 
   useEffect(() => {
-    if (authStatus.isLoggedIn) {
-      loadSubscriptions();
+    safelyTrackFeature({ feature: 'aksd.project-import', status: 'opened' });
+  }, []);
+
+  const toggleSelection = (ns: DiscoveredNamespace) => {
+    setSelections(prev => {
+      const key = namespaceSelectionKey(ns);
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    setSelections(new Set(discovered.map(namespaceSelectionKey)));
+  };
+
+  const deselectAll = () => {
+    setSelections(new Set());
+  };
+
+  const handleCancel = () => {
+    if (!terminalTrackedRef.current) {
+      terminalTrackedRef.current = true;
+      safelyTrackFeature({ feature: 'aksd.project-import', status: 'cancelled' });
     }
-  }, [authStatus.isLoggedIn]);
+    history.push('/');
+  };
 
-  useEffect(() => {
-    if (selectedSubscription) {
-      discoverNamespaces();
+  /** Called when user clicks "Import Selected" */
+  const handleImportClick = () => {
+    if (!registeredClustersReady) {
+      return;
+    }
+    if (selectedCount === 0) {
+      setError(t('Please select at least one namespace to import'));
+      return;
+    }
+
+    terminalTrackedRef.current = false;
+
+    const needsConversion = selectedNamespaces.filter(s => !s.namespace.isAksProject);
+
+    if (needsConversion.length > 0) {
+      // Show confirmation dialog for namespaces that need label conversion
+      setShowConversionDialog(true);
     } else {
-      setNamespaces([]);
-    }
-  }, [selectedSubscription]);
-
-  const loadSubscriptions = async () => {
-    setLoadingSubscriptions(true);
-    setError('');
-
-    try {
-      const result = await getSubscriptions();
-
-      if (!result.success) {
-        setError(result.message);
-        return;
-      }
-
-      setSubscriptions(result.subscriptions || []);
-
-      if (result.subscriptions && result.subscriptions.length === 1) {
-        setSelectedSubscription(result.subscriptions[0]);
-      }
-    } catch (err) {
-      console.error('Error loading subscriptions:', err);
-      setError('Failed to load subscriptions');
-    } finally {
-      setLoadingSubscriptions(false);
+      // All selected are already AKS projects — import directly
+      processImport();
     }
   };
 
-  const discoverNamespaces = async () => {
-    if (!selectedSubscription) {
+  /** Process the import (called after confirmation if conversion needed) */
+  const processImport = async () => {
+    if (!registeredClustersReady) {
       return;
     }
-
-    setLoadingNamespaces(true);
-    setError('');
-    setNamespaces([]);
-
-    try {
-      const mergedClusterNames = Object.values(clustersConf || {}).map((c: any) => c.name);
-
-      const namespacesData = await getManagedNamespacesForSubscription(selectedSubscription.id);
-
-      if (namespacesData.length === 0) {
-        setError('No managed namespaces found in this subscription.');
-        return;
-      }
-
-      const allNamespaces: ImportSelection[] = [];
-
-      // Fetch details for each namespace to check labels
-      // Show progress as we check each one
-      for (let i = 0; i < namespacesData.length; i++) {
-        const ns = namespacesData[i];
-        setDiscoveryProgress(
-          `Checking namespace ${i + 1} of ${namespacesData.length}: ${ns.name}...`
-        );
-
-        try {
-          const details = await getManagedNamespaceDetails({
-            clusterName: ns.clusterName,
-            resourceGroup: ns.resourceGroup,
-            namespaceName: ns.name,
-            subscriptionId: selectedSubscription.id,
-          });
-
-          // Check if namespace has the required project labels
-          // Labels are in properties.labels for AKS managed namespaces
-          const labels = details?.properties?.labels || {};
-          const hasProjectId = labels[PROJECT_ID_LABEL];
-          const isManagedByAKSDesktop =
-            labels[PROJECT_MANAGED_BY_LABEL] === PROJECT_MANAGED_BY_AKS_DESKTOP;
-          // Only include namespaces that have both required labels
-          if (hasProjectId && isManagedByAKSDesktop) {
-            // Check if this cluster is already merged
-            const isClusterMerged = mergedClusterNames.includes(ns.clusterName);
-
-            // Only add namespaces from clusters that are NOT merged
-            if (!isClusterMerged) {
-              const newNamespace = {
-                namespace: {
-                  name: ns.name,
-                  clusterName: ns.clusterName,
-                  resourceGroup: ns.resourceGroup,
-                  subscriptionId: selectedSubscription.id,
-                },
-                projectName: labels[PROJECT_ID_LABEL], // Use existing project ID
-                selected: true, // Select all by default
-                clusterMerged: false,
-              };
-              allNamespaces.push(newNamespace);
-              // Update UI immediately to show found namespaces
-              setNamespaces([...allNamespaces]);
-            }
-          }
-        } catch (detailError) {
-          console.warn(`Failed to fetch details for namespace ${ns.name}:`, detailError);
-          // Skip this namespace if we can't get details
-        }
-      }
-
-      setDiscoveryProgress('');
-
-      if (allNamespaces.length === 0) {
-        setError(
-          'No AKS desktop projects found in unmerged clusters. Managed namespaces must have the required project labels.'
-        );
-      }
-    } catch (err) {
-      console.error('Error discovering namespaces:', err);
-      setError('Failed to discover managed namespaces');
-    } finally {
-      setLoadingNamespaces(false);
-    }
-  };
-
-  const handleImport = async () => {
-    const selectedNamespaces = namespaces.filter(ns => ns.selected);
-
-    if (selectedNamespaces.length === 0) {
-      setError('Please select at least one namespace to import');
-      return;
-    }
-
+    safelyTrackFeature({ feature: 'aksd.project-import', status: 'started' });
+    setShowConversionDialog(false);
     setImporting(true);
     setError('');
     setSuccess('');
-    setImportResults([]);
+    setImportResults(undefined);
 
-    const results: Array<{ namespace: string; success: boolean; message: string }> = [];
+    const results: Array<{
+      namespace: string;
+      clusterName: string;
+      success: boolean;
+      message: string;
+    }> = [];
 
-    // Group namespaces by cluster to merge each cluster only once
-    const clusterMap = new Map<
-      string,
-      Array<{ namespace: ManagedNamespace; projectName: string }>
-    >();
-
-    for (const item of selectedNamespaces) {
-      const { namespace } = item;
-      const clusterKey = `${namespace.clusterName}|${namespace.resourceGroup}|${namespace.subscriptionId}`;
-
-      if (!clusterMap.has(clusterKey)) {
-        clusterMap.set(clusterKey, []);
+    // Build a lookup of cluster -> Azure metadata from ALL discovered namespaces
+    // (not just selected). This ensures we have Azure metadata for clusters even
+    // when the user only selects namespaces that were discovered via K8s API.
+    const clusterAzureMeta = new Map<string, { resourceGroup: string; subscriptionId: string }>();
+    const ambiguousAzureMetadataNames = new Set<string>();
+    for (const ns of discovered) {
+      if (ns.resourceGroup && ns.subscriptionId) {
+        const normalizedClusterName = normalizeClusterName(ns.clusterName);
+        const existing = clusterAzureMeta.get(normalizedClusterName);
+        if (
+          existing &&
+          (existing.resourceGroup !== ns.resourceGroup ||
+            existing.subscriptionId !== ns.subscriptionId)
+        ) {
+          ambiguousAzureMetadataNames.add(normalizedClusterName);
+        } else if (!existing) {
+          clusterAzureMeta.set(normalizedClusterName, {
+            resourceGroup: ns.resourceGroup,
+            subscriptionId: ns.subscriptionId,
+          });
+        }
       }
-      clusterMap.get(clusterKey)!.push(item);
     }
 
-    // Process each cluster and its namespaces
+    // Step 1: Group all selected namespaces by cluster, preferring managed namespace metadata
+    const clusterMap = new Map<
+      string,
+      {
+        key: { clusterName: string; resourceGroup: string; subscriptionId: string };
+        namespaces: DiscoveredNamespace[];
+      }
+    >();
+    const clusterKeyByName = new Map<string, string>();
+    const conflictingClusterNames = new Set<string>();
+    for (const item of selectedNamespaces) {
+      const ns = item.namespace;
+      const normalizedClusterName = normalizeClusterName(ns.clusterName);
+      const meta = clusterAzureMeta.get(normalizedClusterName);
+      if (
+        (!ns.resourceGroup || !ns.subscriptionId) &&
+        ambiguousAzureMetadataNames.has(normalizedClusterName)
+      ) {
+        conflictingClusterNames.add(normalizedClusterName);
+      }
+      const resourceGroup = ns.resourceGroup || meta?.resourceGroup || '';
+      const subscriptionId = ns.subscriptionId || meta?.subscriptionId || '';
+      const clusterKey = `${subscriptionId}\0${resourceGroup}\0${normalizedClusterName}`;
+      const existingClusterKey = clusterKeyByName.get(normalizedClusterName);
+      if (existingClusterKey && existingClusterKey !== clusterKey) {
+        conflictingClusterNames.add(normalizedClusterName);
+      } else if (!existingClusterKey) {
+        clusterKeyByName.set(normalizedClusterName, clusterKey);
+      }
+      const existing = clusterMap.get(clusterKey);
+      if (!existing) {
+        clusterMap.set(clusterKey, {
+          key: {
+            clusterName: ns.clusterName,
+            resourceGroup,
+            subscriptionId,
+          },
+          namespaces: [ns],
+        });
+      } else {
+        existing.namespaces.push(ns);
+        // Prefer managed namespace metadata (non-empty resourceGroup/subscriptionId)
+        if (ns.resourceGroup && ns.subscriptionId && !existing.key.resourceGroup) {
+          existing.key.resourceGroup = ns.resourceGroup;
+          existing.key.subscriptionId = ns.subscriptionId;
+        }
+      }
+    }
+
+    // Step 2: Register clusters, convert namespaces, and import — per cluster
     let processedCount = 0;
-    for (const [clusterKey, namespacesInCluster] of clusterMap) {
-      const [clusterName, resourceGroup, subscriptionId] = clusterKey.split('|');
-
-      setImportProgress(
-        `Merging cluster ${clusterName} (${namespacesInCluster.length} namespace${
-          namespacesInCluster.length > 1 ? 's' : ''
-        })...`
-      );
-
-      // Step 1: Merge/register the cluster ONCE per unique cluster
+    const totalCount = selectedNamespaces.length;
+    for (const {
+      key: { clusterName, resourceGroup, subscriptionId },
+      namespaces: namespacesInCluster,
+    } of clusterMap.values()) {
       try {
-        const registerResult = await registerAKSCluster(subscriptionId, resourceGroup, clusterName);
-
-        if (!registerResult.success) {
-          // If cluster merge fails, mark all namespaces from this cluster as failed
-          for (const { namespace } of namespacesInCluster) {
+        if (conflictingClusterNames.has(normalizeClusterName(clusterName))) {
+          for (const ns of namespacesInCluster) {
             results.push({
-              namespace: `${namespace.name} (${clusterName})`,
+              namespace: `${ns.name} (${clusterName})`,
+              clusterName,
               success: false,
-              message: `Failed to merge cluster: ${registerResult.message}`,
+              message: t(
+                'Cannot import projects with the same cluster name in different Azure scopes because their kubeconfig entries would overwrite each other.'
+              ),
             });
           }
           continue;
         }
 
-        // Step 2: Mark all namespaces in this cluster as successfully imported
-        // No need to patch labels - they already exist from AKS managed namespace
-        for (const { namespace, projectName } of namespacesInCluster) {
+        // 2a: Register the cluster if it's not already registered in Headlamp.
+        // Re-registering with a managedNamespace param overwrites the kubeconfig
+        // with namespace-scoped credentials, which would break access to
+        // previously imported namespaces on this cluster.
+        const clusterIsRegistered = registeredClusters.has(normalizeClusterName(clusterName));
+        if (clusterIsRegistered && subscriptionId && resourceGroup) {
+          const registeredScope = getClusterSettings(clusterName).azureRegistration;
+          const scopeMatches =
+            typeof registeredScope?.subscriptionId === 'string' &&
+            typeof registeredScope.resourceGroup === 'string' &&
+            registeredScope.subscriptionId.toLowerCase() === subscriptionId.toLowerCase() &&
+            registeredScope.resourceGroup.toLowerCase() === resourceGroup.toLowerCase();
+          if (!scopeMatches) {
+            for (const ns of namespacesInCluster) {
+              results.push({
+                namespace: `${ns.name} (${clusterName})`,
+                clusterName,
+                success: false,
+                message: t(
+                  'Cluster {{clusterName}} is already registered from a different or unknown Azure scope. Remove and register it again before importing these projects.',
+                  { clusterName }
+                ),
+              });
+            }
+            continue;
+          }
+        } else if (!clusterIsRegistered) {
+          // Non-managed namespaces lack Azure metadata, so we can't register the cluster
+          // on their behalf. The cluster must already be registered.
+          if (!subscriptionId || !resourceGroup) {
+            for (const ns of namespacesInCluster) {
+              results.push({
+                namespace: `${ns.name} (${clusterName})`,
+                clusterName,
+                success: false,
+                message: t(
+                  'Cluster {{clusterName}} must be registered before importing regular namespaces. Import a managed namespace from this cluster first.',
+                  { clusterName }
+                ),
+              });
+            }
+            continue;
+          }
+
+          setImportProgress(
+            `${t('Merging cluster {{clusterName}} ({{count}} namespace(s))', {
+              clusterName,
+              count: namespacesInCluster.length,
+            })}...`
+          );
+
+          const registerResult = await registerAKSCluster(
+            subscriptionId,
+            resourceGroup,
+            clusterName
+          );
+
+          if (!registerResult.success) {
+            for (const ns of namespacesInCluster) {
+              results.push({
+                namespace: `${ns.name} (${clusterName})`,
+                clusterName,
+                success: false,
+                message: t('Failed to merge cluster: {{message}}', {
+                  message: registerResult.message,
+                }),
+              });
+            }
+            continue;
+          }
+        }
+
+        // 2b: Apply project labels to namespaces that need conversion.
+        // The project-id label is required for Headlamp to recognize the namespace as a project,
+        // so we must wait for this to complete before importing.
+        const failedNames = new Set<string>();
+        for (const ns of namespacesInCluster) {
+          if (ns.isAksProject) continue;
+
+          setImportProgress(
+            t('Converting {{name}} to AKS project (this may take a moment)...', {
+              name: ns.name,
+            })
+          );
+          try {
+            // For managed namespaces, fall back to cluster-level Azure metadata
+            // (from other managed namespaces on the same cluster) so applyProjectLabels
+            // uses the ARM API. For regular namespaces, use their own (empty) metadata
+            // so applyProjectLabels uses the K8s API — the ARM API would reject them
+            // because they don't exist as managed namespace resources.
+            await applyProjectLabels({
+              namespaceName: ns.name,
+              clusterName: ns.clusterName,
+              subscriptionId: ns.isManagedNamespace
+                ? ns.subscriptionId || subscriptionId
+                : ns.subscriptionId,
+              resourceGroup: ns.isManagedNamespace
+                ? ns.resourceGroup || resourceGroup
+                : ns.resourceGroup,
+            });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            failedNames.add(ns.name);
+            results.push({
+              namespace: `${ns.name} (${clusterName})`,
+              clusterName,
+              success: false,
+              message: t('Failed to convert namespace: {{message}}', { message }),
+            });
+          }
+        }
+
+        // 2c: Update allowed namespaces in localStorage — only if the user
+        // already has an allowedNamespaces restriction configured.  Creating a
+        // new restriction as a side-effect of import would hide every other
+        // project the user can see (see #489).
+        const importableInCluster = namespacesInCluster.filter(ns => !failedNames.has(ns.name));
+        if (importableInCluster.length > 0) {
+          try {
+            const settings = getClusterSettings(clusterName);
+            const existing = settings.allowedNamespaces;
+            if (existing && existing.length > 0) {
+              settings.allowedNamespaces = [
+                ...new Set([...existing, ...importableInCluster.map(ns => ns.name)]),
+              ];
+              setClusterSettings(clusterName, settings);
+            }
+          } catch (e) {
+            console.error('Failed to update allowed namespaces for cluster ' + clusterName, e);
+          }
+        }
+
+        for (const ns of importableInCluster) {
           processedCount++;
           setImportProgress(
-            `Importing ${processedCount} of ${selectedNamespaces.length}: ${namespace.name} from ${clusterName}...`
+            `${t('Importing {{current}} of {{total}}: {{name}} from {{clusterName}}', {
+              current: processedCount,
+              total: totalCount,
+              name: ns.name,
+              clusterName,
+            })}...`
           );
 
           results.push({
-            namespace: `${namespace.name} (${clusterName})`,
+            namespace: `${ns.name} (${clusterName})`,
+            clusterName,
             success: true,
-            message: `Project '${projectName}' successfully imported from namespace '${namespace.name}'`,
+            message: ns.isAksProject
+              ? t("Project '{{name}}' successfully imported", { name: ns.name })
+              : t("Namespace '{{name}}' converted and imported as project", { name: ns.name }),
           });
         }
       } catch (err) {
-        // Mark all namespaces from this cluster as failed
-        for (const { namespace } of namespacesInCluster) {
+        for (const ns of namespacesInCluster) {
           results.push({
-            namespace: `${namespace.name} (${clusterName})`,
+            namespace: `${ns.name} (${clusterName})`,
+            clusterName,
             success: false,
-            message: err instanceof Error ? err.message : 'Unknown error',
+            message: err instanceof Error ? err.message : t('Unknown error'),
           });
         }
       }
@@ -290,274 +432,293 @@ export default function ImportAKSProjects() {
 
     const successCount = results.filter(r => r.success).length;
     const failureCount = results.filter(r => !r.success).length;
-    const successfulClusters = new Set(
-      results.filter(r => r.success).map(r => r.namespace.split('(')[1]?.replace(')', '').trim())
-    ).size;
+    const successfulClusters = new Set(results.filter(r => r.success).map(r => r.clusterName)).size;
 
     if (successCount > 0) {
-      setSuccess(
-        `Successfully merged ${successfulClusters} cluster${
-          successfulClusters > 1 ? 's' : ''
-        } with ${successCount} project${successCount > 1 ? 's' : ''}` +
-          (failureCount > 0
-            ? `. ${failureCount} project${failureCount > 1 ? 's' : ''} failed.`
-            : '.')
-      );
+      const clusterText = t('Successfully merged {{count}} cluster(s)', {
+        count: successfulClusters,
+      });
+      const projectText = t('with {{count}} project(s)', { count: successCount });
+      const failureSuffix =
+        failureCount > 0 ? ` ${t('{{count}} failed.', { count: failureCount })}` : '.';
+      setSuccess(`${clusterText} ${projectText}${failureSuffix}`);
+    } else if (results.length > 0) {
+      setError(t('Failed to import any projects. See details below.'));
+    }
+
+    terminalTrackedRef.current = true;
+    if (failureCount === 0 && successCount > 0) {
+      safelyTrackFeature({ feature: 'aksd.project-import', status: 'succeeded' });
+    } else if (successCount > 0) {
+      safelyTrackFeature({ feature: 'aksd.project-import', status: 'completed' });
+      safelyTrackError({
+        area: 'project-import',
+        errorClass: 'UnknownError',
+        phase: 'completed',
+      });
     } else {
-      setError('Failed to import any projects. See details below.');
+      safelyTrackFeature({ feature: 'aksd.project-import', status: 'failed' });
+      safelyTrackError({
+        area: 'project-import',
+        errorClass: 'UnknownError',
+        phase: 'failed',
+      });
     }
 
     setImporting(false);
     setImportProgress('');
   };
 
-  const toggleNamespaceSelection = (index: number) => {
-    setNamespaces(prev => {
-      const updated = [...prev];
-      updated[index] = { ...updated[index], selected: !updated[index].selected };
-      return updated;
-    });
-  };
-
-  const selectAll = () => {
-    setNamespaces(prev => prev.map(ns => ({ ...ns, selected: true })));
-  };
-
-  const deselectAll = () => {
-    setNamespaces(prev => prev.map(ns => ({ ...ns, selected: false })));
-  };
-
-  const handleCancel = () => {
-    history.push('/');
-  };
+  const displayError = error || (!dismissedDiscoveryError && discoveryError) || '';
 
   return (
-    <AzureAuthGuard>
-      <AzureCliWarning suggestions={[]} />
+    <>
       <PageGrid>
-        <SectionBox title="Import AKS Projects">
-          <Box sx={{ p: 3 }}>
-            <Typography variant="body1" sx={{ mb: 3 }}>
-              Import existing AKS managed namespaces as projects. This will discover managed
-              namespaces from your AKS clusters and set them up as projects in AKS desktop.
-            </Typography>
-
-            {error && (
-              <Alert severity="error" onClose={() => setError('')} sx={{ mb: 2 }}>
-                {error}
-              </Alert>
+        <SectionBox title={t('Import AKS Projects')}>
+          <Typography variant="body1" sx={{ mb: 3 }}>
+            {t(
+              'Import existing managed namespaces and regular namespaces as projects. Namespaces that are not yet AKS Desktop projects will be converted by adding the required project label.'
             )}
+          </Typography>
 
-            {success && (
-              <Alert severity="success" onClose={() => setSuccess('')} sx={{ mb: 2 }}>
-                {success}
-              </Alert>
-            )}
+          {displayError && (
+            <Alert
+              severity="error"
+              onClose={() => {
+                if (error) {
+                  setError('');
+                } else {
+                  setDismissedDiscoveryError(true);
+                }
+              }}
+              sx={{ mb: 2 }}
+            >
+              {displayError}
+            </Alert>
+          )}
 
-            {/* Step 1: Select Subscription */}
-            <Card sx={{ mb: 3 }}>
-              <CardContent>
-                <Typography variant="h6" sx={{ mb: 2 }}>
-                  <Icon icon="mdi:numeric-1-circle" style={{ marginRight: 8 }} />
-                  Select Subscription
+          {success && (
+            <Alert severity="success" onClose={() => setSuccess('')} sx={{ mb: 2 }}>
+              {success}
+            </Alert>
+          )}
+
+          {!importResults && (
+            <>
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  mb: 2,
+                  gap: 1,
+                }}
+              >
+                <Typography variant="h6">
+                  {t('Select Namespaces to Import')}{' '}
+                  {t('{{count}} selected', { count: selectedCount })}
                 </Typography>
+                <Button
+                  size="small"
+                  variant="contained"
+                  color="secondary"
+                  onClick={refresh}
+                  disabled={importing || loadingNamespaces}
+                  sx={{ ml: 'auto' }}
+                  startIcon={<Icon icon="mdi:refresh" />}
+                >
+                  {t('Refresh')}
+                </Button>
+                <Button
+                  size="small"
+                  variant="contained"
+                  color="secondary"
+                  onClick={selectAll}
+                  disabled={importing}
+                >
+                  {t('Select All')}
+                </Button>
+                <Button
+                  size="small"
+                  variant="contained"
+                  color="secondary"
+                  onClick={deselectAll}
+                  disabled={importing}
+                >
+                  {t('Deselect All')}
+                </Button>
+              </Box>
 
-                <Autocomplete
-                  fullWidth
-                  options={subscriptions}
-                  value={selectedSubscription}
-                  onChange={(event, value) => setSelectedSubscription(value)}
-                  getOptionLabel={option =>
-                    `${option.name}${option.state !== 'Enabled' ? ` (${option.state})` : ''}`
-                  }
-                  isOptionEqualToValue={(option, value) => option.id === value.id}
-                  disabled={loadingSubscriptions || importing}
-                  loading={loadingSubscriptions}
-                  renderInput={params => (
-                    <TextField
-                      {...params}
-                      label="Subscription"
-                      placeholder="Select an Azure subscription"
-                      InputProps={{
-                        ...params.InputProps,
-                        endAdornment: (
-                          <>
-                            {loadingSubscriptions ? (
-                              <CircularProgress color="inherit" size={20} />
-                            ) : null}
-                            {params.InputProps.endAdornment}
-                          </>
-                        ),
-                      }}
-                    />
-                  )}
-                />
-              </CardContent>
-            </Card>
-
-            {/* Step 2: Loading indicator for namespace discovery */}
-            {selectedSubscription && loadingNamespaces && (
-              <Card sx={{ mb: 3 }}>
-                <CardContent>
-                  <Box display="flex" flexDirection="column" gap={1}>
-                    <Box display="flex" alignItems="center">
-                      <CircularProgress size={20} style={{ marginRight: 8 }} />
-                      <Typography>
-                        {discoveryProgress || 'Discovering managed namespaces from subscription...'}
-                      </Typography>
-                    </Box>
-                    {namespaces.length > 0 && (
-                      <Typography variant="caption" color="text.secondary">
-                        Found {namespaces.length} project{namespaces.length !== 1 ? 's' : ''} so
-                        far...
-                      </Typography>
-                    )}
-                  </Box>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Step 2: Select Namespaces to Import */}
-            {namespaces.length > 0 && (
-              <Card sx={{ mb: 3 }}>
-                <CardContent>
-                  <Box
-                    sx={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      mb: 2,
-                    }}
-                  >
-                    <Typography variant="h6">
-                      <Icon icon="mdi:numeric-2-circle" style={{ marginRight: 8 }} />
-                      Select Namespaces to Import ({
-                        namespaces.filter(ns => ns.selected).length
-                      }{' '}
-                      selected)
-                    </Typography>
-                    <Box>
-                      <Button size="small" onClick={selectAll} disabled={importing}>
-                        Select All
-                      </Button>
-                      <Button size="small" onClick={deselectAll} disabled={importing}>
-                        Deselect All
-                      </Button>
-                    </Box>
-                  </Box>
-
-                  <Box sx={{ maxHeight: 400, overflowY: 'auto' }}>
-                    {namespaces.map((item, index) => (
-                      <Box
-                        key={`${item.namespace.clusterName}-${item.namespace.name}`}
-                        sx={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 2,
-                          p: 1,
-                          borderBottom: '1px solid',
-                          borderColor: 'divider',
-                        }}
-                      >
-                        <FormControlLabel
-                          control={
-                            <Checkbox
-                              checked={item.selected}
-                              onChange={() => toggleNamespaceSelection(index)}
-                              disabled={importing}
-                            />
-                          }
-                          label=""
+              <Table
+                enableTopToolbar={false}
+                enableRowSelection={false}
+                data={namespaces}
+                loading={loadingNamespaces}
+                columns={[
+                  {
+                    header: '',
+                    accessorFn: (n: ImportSelection) => n.selected,
+                    gridTemplate: 'min-content',
+                    enableSorting: false,
+                    Cell: ({ row: { original: item } }: { row: { original: ImportSelection } }) => (
+                      <Checkbox
+                        checked={item.selected}
+                        onChange={() => toggleSelection(item.namespace)}
+                        disabled={importing}
+                        size="small"
+                        sx={{ padding: '4px' }}
+                      />
+                    ),
+                  },
+                  {
+                    header: t('Name'),
+                    accessorFn: (n: ImportSelection) => n.namespace.name,
+                  },
+                  {
+                    header: t('Type'),
+                    accessorFn: (n: ImportSelection) =>
+                      n.namespace.isManagedNamespace ? 'AKS Managed' : 'Regular',
+                    gridTemplate: 'min-content',
+                    Cell: ({ row: { original: item } }: { row: { original: ImportSelection } }) => (
+                      <Chip
+                        label={item.namespace.isManagedNamespace ? t('AKS Managed') : t('Regular')}
+                        color={item.namespace.isManagedNamespace ? 'primary' : 'default'}
+                        size="small"
+                        variant="outlined"
+                      />
+                    ),
+                  },
+                  {
+                    header: t('Cluster'),
+                    accessorFn: (n: ImportSelection) => n.namespace.clusterName,
+                  },
+                  {
+                    header: t('Resource Group'),
+                    accessorFn: (n: ImportSelection) => n.namespace.resourceGroup,
+                  },
+                  {
+                    header: t('AKS Project?'),
+                    accessorFn: (n: ImportSelection) => (n.namespace.isAksProject ? 'Yes' : 'No'),
+                    gridTemplate: 'min-content',
+                    Cell: ({ row: { original: item } }: { row: { original: ImportSelection } }) =>
+                      item.namespace.isAksProject ? (
+                        <Chip
+                          icon={<Icon icon="mdi:check-circle" />}
+                          label={t('Yes')}
+                          color="success"
+                          size="small"
+                          variant="outlined"
                         />
-                        <Box sx={{ flex: 1 }}>
-                          <Typography variant="body2">
-                            <strong>{item.projectName}</strong>
-                          </Typography>
-                          <Typography variant="caption" color="textSecondary">
-                            Namespace: {item.namespace.name} • Cluster: {item.namespace.clusterName}{' '}
-                            • Resource Group: {item.namespace.resourceGroup}
-                          </Typography>
-                        </Box>
-                      </Box>
-                    ))}
-                  </Box>
+                      ) : (
+                        <Chip
+                          icon={<Icon icon="mdi:close-circle" />}
+                          label={t('No')}
+                          color="default"
+                          size="small"
+                          variant="outlined"
+                        />
+                      ),
+                  },
+                ]}
+              />
+              <Box sx={{ display: 'flex', width: '100%', gap: 1 }}>
+                <Button
+                  variant="contained"
+                  color="secondary"
+                  onClick={handleCancel}
+                  disabled={importing}
+                >
+                  {t('Cancel')}
+                </Button>
 
+                <Button
+                  variant="contained"
+                  color="primary"
+                  onClick={handleImportClick}
+                  disabled={selectedCount === 0 || importing || !registeredClustersReady}
+                  sx={{ ml: 'auto' }}
+                  startIcon={
+                    importing ? <CircularProgress size={20} /> : <Icon icon="mdi:import" />
+                  }
+                >
+                  {importing
+                    ? importProgress || t('Importing') + '...'
+                    : t('Import Selected Projects')}
+                </Button>
+              </Box>
+            </>
+          )}
+
+          {/* Import Results */}
+          {importResults && importResults.length > 0 && (
+            <>
+              <Box sx={{ mt: 2 }}>
+                {importResults.map(result => (
+                  <Alert
+                    key={`${result.clusterName}/${result.namespace}`}
+                    severity={result.success ? 'success' : 'error'}
+                    sx={{ mb: 1 }}
+                  >
+                    <strong>{result.namespace}</strong>: {result.message}
+                  </Alert>
+                ))}
+              </Box>
+              <Box sx={{ mt: 3, display: 'flex', gap: 2 }}>
+                {importResults.some(r => r.success) && (
                   <Button
                     variant="contained"
                     color="primary"
-                    onClick={handleImport}
-                    disabled={namespaces.filter(ns => ns.selected).length === 0 || importing}
-                    sx={{ mt: 2 }}
-                    startIcon={
-                      importing ? <CircularProgress size={20} /> : <Icon icon="mdi:import" />
-                    }
+                    onClick={() => {
+                      // Navigate to root and force a full reload because Headlamp's cluster
+                      // config is loaded at startup and does not reactively update when
+                      // kubeconfig/localStorage changes.
+                      history.replace('/');
+                      window.location.reload();
+                    }}
+                    startIcon={<Icon icon="mdi:folder-open" />}
                   >
-                    {importing ? importProgress || 'Importing...' : 'Import Selected Projects'}
-                  </Button>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Action Buttons */}
-            {importResults.length > 0 && (
-              <Box sx={{ mt: 3, display: 'flex', gap: 2 }}>
-                {importResults.some(r => r.success) ? (
-                  <>
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      onClick={() => {
-                        history.replace('/');
-                        window.location.reload();
-                      }}
-                      startIcon={<Icon icon="mdi:folder-open" />}
-                    >
-                      Go To Projects
-                    </Button>
-                    <Button variant="outlined" onClick={handleCancel}>
-                      Close
-                    </Button>
-                  </>
-                ) : (
-                  <Button variant="outlined" onClick={handleCancel}>
-                    Close
+                    {t('Go To Projects')}
                   </Button>
                 )}
-              </Box>
-            )}
-
-            {/* Import Results */}
-            {importResults.length > 0 && (
-              <Card sx={{ mt: 3 }}>
-                <CardContent>
-                  <Typography variant="h6" sx={{ mb: 2 }}>
-                    Import Results
-                  </Typography>
-
-                  {importResults.map((result, index) => (
-                    <Alert
-                      key={index}
-                      severity={result.success ? 'success' : 'error'}
-                      sx={{ mb: 1 }}
-                    >
-                      <strong>{result.namespace}:</strong> {result.message}
-                    </Alert>
-                  ))}
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Cancel Button - shown when no import has started */}
-            {importResults.length === 0 && (
-              <Box sx={{ mt: 3, display: 'flex', gap: 2 }}>
-                <Button variant="outlined" onClick={handleCancel} disabled={importing}>
-                  Cancel
+                <Button
+                  variant="contained"
+                  color="secondary"
+                  onClick={handleCancel}
+                  disabled={importing}
+                >
+                  {t('Close')}
                 </Button>
               </Box>
-            )}
-          </Box>
+            </>
+          )}
         </SectionBox>
       </PageGrid>
+
+      <ConversionDialog
+        open={showConversionDialog}
+        onClose={() => {
+          if (!terminalTrackedRef.current) {
+            terminalTrackedRef.current = true;
+            safelyTrackFeature({ feature: 'aksd.project-import', status: 'cancelled' });
+          }
+          setShowConversionDialog(false);
+        }}
+        onConfirm={processImport}
+        namespacesToConvert={selectedNamespaces
+          .filter(s => !s.namespace.isAksProject)
+          .map(s => s.namespace)}
+        namespacesToImport={selectedNamespaces
+          .filter(s => s.namespace.isAksProject)
+          .map(s => s.namespace)}
+        converting={importing}
+      />
+    </>
+  );
+}
+
+export default function ImportAKSProjects() {
+  return (
+    <AzureAuthGuard>
+      <ImportAKSProjectsContent />
     </AzureAuthGuard>
   );
 }

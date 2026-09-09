@@ -1,0 +1,16 @@
+{
+  "name": "insights-plugin",
+  "version": "0.3.0",
+  "description": "Insights plugin for eBPF-based Observability (based on Inspektor Gadget) (Preview)",
+  "scripts": {
+    "build": "bash scripts/download-artifacts.sh",
+    "test": "bash scripts/validate-artifacts.sh",
+    "tsc": "echo 'no-op: no source code'",
+    "lint": "echo 'no-op: no source code'",
+    "format": "echo 'no-op: no source code'",
+    "package": "headlamp-plugin package"
+  },
+  "devDependencies": {
+    "@kinvolk/headlamp-plugin": "^0.13.1"
+  }
+}

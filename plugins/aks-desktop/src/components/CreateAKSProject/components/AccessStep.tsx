@@ -2,25 +2,97 @@
 // Licensed under the Apache 2.0.
 
 import { Icon } from '@iconify/react';
+import { useTranslation } from '@kinvolk/headlamp-plugin/lib';
 import { TextField } from '@mui/material';
 import { Box, Button, FormControl, Grid, IconButton, MenuItem, Typography } from '@mui/material';
-import React from 'react';
-import type { AccessStepProps, UserAssignment } from '../types';
-import { AVAILABLE_ROLES, ROLE_DESCRIPTIONS } from '../types';
-import { isValidEmail } from '../validators';
-import { FormField } from './FormField';
+import React, { useEffect, useRef } from 'react';
+import { isEntraObjectId, isUserPrincipalName } from '../../../utils/shared/entraIdentifiers';
+import type { AccessStepProps, RoleType, UserAssignment } from '../types';
+import { AVAILABLE_ROLES } from '../types';
+import type { UserSelection } from './UserSearchField';
+import { UserSearchField } from './UserSearchField';
+
+function getRoleDescription(t: (key: string) => string, role: RoleType): string {
+  switch (role) {
+    case 'Reader':
+      return t(
+        'Read-only access to most objects in a namespace. Cannot view roles, role bindings, or Secrets.'
+      );
+    case 'Writer':
+      return t(
+        'Read/write access to most objects in a namespace. Cannot view or modify roles or role bindings. Can access Secrets and run Pods as any ServiceAccount in the namespace.'
+      );
+    case 'Admin':
+      return t(
+        'Read/write access to most resources in a namespace. Can create roles and role bindings within the namespace. Cannot write to resource quota or the namespace itself.'
+      );
+    default: {
+      const _exhaustive: never = role;
+      return String(_exhaustive);
+    }
+  }
+}
 
 /**
- * Access step component for user assignment management
+ * Manages user assignments and keeps each display label aligned with its Entra
+ * object ID and UPN, clearing stale labels when either identifier changes.
  */
 export const AccessStep: React.FC<AccessStepProps> = ({
   formData,
   onFormDataChange,
   loading = false,
+  requiresUpn = false,
 }) => {
-  const handleAssignmentChange = (index: number, field: keyof UserAssignment, value: string) => {
+  const { t } = useTranslation();
+  const lastAssigneeRef = useRef<HTMLInputElement>(null);
+  const prevCountRef = useRef(formData.userAssignments.length);
+
+  // Focus on the new assignment field when it is added
+  useEffect(() => {
+    if (formData.userAssignments.length > prevCountRef.current) {
+      requestAnimationFrame(() => {
+        lastAssigneeRef.current?.focus();
+      });
+    }
+    prevCountRef.current = formData.userAssignments.length;
+  }, [formData.userAssignments.length]);
+
+  const handleAssignmentChange = (index: number, selection: UserSelection) => {
     const updatedAssignments = [...formData.userAssignments];
-    updatedAssignments[index] = { ...updatedAssignments[index], [field]: value };
+    const prevAssignment = updatedAssignments[index];
+    const nextUpn =
+      requiresUpn && selection.upn === undefined ? prevAssignment?.upn : selection.upn;
+
+    const identityChanged =
+      prevAssignment?.objectId !== selection.objectId || prevAssignment?.upn !== nextUpn;
+    // Keep an explicit display name; otherwise clear it when either identifier changes.
+    const nextDisplayName =
+      selection.displayName ?? (identityChanged ? '' : prevAssignment?.displayName);
+
+    updatedAssignments[index] = {
+      ...prevAssignment,
+      objectId: selection.objectId,
+      upn: nextUpn,
+      displayName: nextDisplayName,
+    };
+    onFormDataChange({ userAssignments: updatedAssignments });
+  };
+
+  const handleUpnChange = (index: number, upn: string) => {
+    const updatedAssignments = [...formData.userAssignments];
+    const prevAssignment = updatedAssignments[index];
+    updatedAssignments[index] = {
+      ...prevAssignment,
+      upn,
+      displayName:
+        prevAssignment.displayName === prevAssignment.upn ? upn : prevAssignment.displayName,
+    };
+    onFormDataChange({ userAssignments: updatedAssignments });
+  };
+
+  const handleRoleChange = (index: number, role: string) => {
+    const updatedAssignments = [...formData.userAssignments];
+    updatedAssignments[index] = { ...updatedAssignments[index], role };
     onFormDataChange({ userAssignments: updatedAssignments });
   };
 
@@ -31,7 +103,7 @@ export const AccessStep: React.FC<AccessStepProps> = ({
 
   const handleAddAssignment = () => {
     const newAssignment: UserAssignment = {
-      email: '',
+      objectId: '',
       role: 'Writer',
     };
     onFormDataChange({
@@ -39,50 +111,80 @@ export const AccessStep: React.FC<AccessStepProps> = ({
     });
   };
 
-  const hasInvalidAssignments = formData.userAssignments.some(assignment => {
-    const trimmedEmail = assignment.email.trim();
-    return trimmedEmail === '' || !isValidEmail(trimmedEmail);
-  });
+  const assigneeError = (assignment: UserAssignment): string => {
+    if (assignment.objectId.trim() === '' && !assignment.upn?.trim()) {
+      return t('Search for a user or remove this entry');
+    }
+    if (!isEntraObjectId(assignment.objectId)) {
+      // Required for every grant: managed namespaces key role assignments on it,
+      // and Arc needs it for the connectivity role. Without it the assignment is
+      // dropped after the project is created, which is far worse than a form error.
+      return t('Select a user from the search results, or enter their object ID');
+    }
+    return '';
+  };
+
+  const upnError = (assignment: UserAssignment): string => {
+    if (requiresUpn && !isUserPrincipalName(assignment.upn)) {
+      // An object ID cannot name a RoleBinding subject — it would grant nothing.
+      return t("This cluster needs this user's sign-in name (e.g. someone@contoso.com)");
+    }
+    return '';
+  };
+
+  const hasInvalidAssignments = formData.userAssignments.some(
+    assignment => assigneeError(assignment) !== '' || upnError(assignment) !== ''
+  );
 
   return (
     <Box>
       <Typography variant="h5" component="h2" gutterBottom>
-        Access
+        {t('Access')}
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Assign permissions to users who need access to your namespace
+        {t('Assign permissions to users who need access to your namespace')}
       </Typography>
       <Grid container spacing={3}>
         {formData.userAssignments.map((assignment, idx) => (
           <React.Fragment key={idx}>
-            <Grid item xs={12} md={6}>
+            <Grid item xs={12} md={requiresUpn ? 4 : 6}>
               <FormControl fullWidth>
-                <FormField
-                  label={`Assignee ${idx + 1} (email)`}
-                  type="email"
-                  value={assignment.email}
-                  onChange={value => handleAssignmentChange(idx, 'email', value as string)}
-                  placeholder="user@example.com"
+                <UserSearchField
+                  label={`${t('Assignee')} ${idx + 1}`}
+                  value={assignment.objectId}
+                  displayName={assignment.displayName}
+                  onChange={selection => handleAssignmentChange(idx, selection)}
                   disabled={loading}
-                  error={assignment.email.trim() === '' || !isValidEmail(assignment.email.trim())}
-                  helperText={
-                    assignment.email.trim() === ''
-                      ? 'Please enter a valid email address or remove this entry'
-                      : !isValidEmail(assignment.email.trim())
-                      ? 'Please enter a valid email address'
-                      : ''
+                  error={assigneeError(assignment) !== ''}
+                  helperText={assigneeError(assignment)}
+                  inputRef={
+                    idx === formData.userAssignments.length - 1 ? lastAssigneeRef : undefined
                   }
                 />
               </FormControl>
             </Grid>
-            <Grid item xs={10} md={5}>
+            {requiresUpn && (
+              <Grid item xs={12} md={4}>
+                <TextField
+                  fullWidth
+                  variant="outlined"
+                  label={`${t('Assignee')} ${idx + 1} UPN`}
+                  value={assignment.upn ?? ''}
+                  onChange={event => handleUpnChange(idx, event.target.value)}
+                  disabled={loading}
+                  error={upnError(assignment) !== ''}
+                  helperText={upnError(assignment)}
+                />
+              </Grid>
+            )}
+            <Grid item xs={10} md={requiresUpn ? 3 : 5}>
               <TextField
                 fullWidth
                 select
                 variant="outlined"
-                label="Role"
+                label={t('Role')}
                 value={assignment.role}
-                onChange={e => handleAssignmentChange(idx, 'role', e.target.value as string)}
+                onChange={e => handleRoleChange(idx, e.target.value)}
                 disabled={loading}
                 SelectProps={{
                   renderValue: (value: string) => value,
@@ -98,9 +200,9 @@ export const AccessStep: React.FC<AccessStepProps> = ({
                         variant="caption"
                         color="text.secondary"
                         component="div"
-                        sx={{ fontSize: '0.7rem', lineHeight: 1.3, mt: 0.5 }}
+                        sx={{ fontSize: '0.7rem', lineHeight: 1.3, mt: 0.5, whiteSpace: 'normal' }}
                       >
-                        {ROLE_DESCRIPTIONS[role]}
+                        {getRoleDescription(t, role)}
                       </Typography>
                     </Box>
                   </MenuItem>
@@ -109,7 +211,7 @@ export const AccessStep: React.FC<AccessStepProps> = ({
             </Grid>
             <Grid item xs={2} md={1} sx={{ display: 'flex', alignItems: 'flex-start' }}>
               <IconButton
-                aria-label="Remove assignee"
+                aria-label={t('Remove assignee')}
                 onClick={() => handleRemoveAssignment(idx)}
                 size="large"
                 disabled={loading}
@@ -127,7 +229,7 @@ export const AccessStep: React.FC<AccessStepProps> = ({
             onClick={handleAddAssignment}
             disabled={loading || hasInvalidAssignments}
           >
-            Add assignee
+            {t('Add assignee')}
           </Button>
         </Grid>
       </Grid>

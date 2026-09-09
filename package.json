@@ -1,18 +1,25 @@
 {
   "name": "aks-desktop-monorepo",
-  "version": "0.1.0-alpha",
+  "version": "0.10.0",
   "description": "AKS desktop - Headlamp Plugin Monorepo",
   "private": true,
   "scripts": {
-    "build": "npm run plugin:setup && cd headlamp && make app",
-    "build:linux": "npm run plugin:setup && cd headlamp && make app-linux",
+    "build": "npx --yes tsx ./build/build-host-platform.ts",
+    "build:linux": "npm run build:linux:x64 && npm run build:linux:arm64 && npm run build:linux:armv7l",
+    "build:linux:x64": "npx --yes tsx ./build/setup-plugins.ts --platform=linux --arch=x64 && cd headlamp && make app-build && cd app && npm run package -- --linux --x64",
+    "build:linux:arm64": "npx --yes tsx ./build/setup-plugins.ts --platform=linux --arch=arm64 && cd headlamp && make app-build && cd app && npm run package -- --linux AppImage tar.gz --arm64",
+    "build:linux:armv7l": "npx --yes tsx ./build/setup-plugins.ts --platform=linux --arch=armv7l && cd headlamp && make app-build && cd app && npm run package -- --linux AppImage tar.gz --armv7l",
     "build:mac": "npm run plugin:setup && cd headlamp && make app-mac",
-    "build:win": "npm run plugin:setup && cd headlamp && make app-win",
-    "build:win-ci": "npm run plugin:setup && cd headlamp && make app-win",
+    "build:win": "npm run build:win:x64 && npm run build:win:arm64",
+    "build:win:x64": "npx --yes tsx ./build/setup-plugins.ts --platform=win32 --arch=x64 && cd headlamp && make app-win-x64",
+    "build:win:arm64": "npx --yes tsx ./build/setup-plugins.ts --platform=win32 --arch=arm64 && cd headlamp && make app-win-arm64",
+    "build:win-ci": "npm run build:win",
     "build:unpacked": "npm run plugin:setup && cd headlamp && make app-build",
     "build:unpacked:linux": "npm run plugin:setup && cd headlamp && make app-build",
     "build:unpacked:mac": "npm run plugin:setup && cd headlamp && make app-build",
     "build:unpacked:win": "npm run plugin:setup && cd headlamp && make app-build",
+    "test:build": "npx --yes tsx --test build/plugin-packaging.test.ts build/aks-mcp-config.test.ts build/azure-cli-verification.test.ts build/az-cli-config.test.ts",
+    "test:i18n": "node --test Localize/translation-manager.test.mjs",
     "test:post-build": "npx --yes tsx ./build/verify-bundled-tools.ts",
     "plugin:setup": "npx --yes tsx ./build/setup-plugins.ts",
     "plugin:install": "cd plugins/aks-desktop && npm install",
@@ -23,13 +30,21 @@
     "plugin:test:all": "cd plugins/aks-desktop && npm run test:all",
     "plugin:format": "cd plugins/aks-desktop && npm run format",
     "plugin:package": "cd plugins/aks-desktop && npm run package",
+    "ai-assistant:install": "cd plugins/ai-assistant && npm install",
+    "ai-assistant:build": "cd plugins/ai-assistant && npm run build",
+    "ai-assistant:start": "cd plugins/ai-assistant && npm start",
+    "ai-assistant:test": "cd plugins/ai-assistant && npm test",
+    "ai-assistant:lint": "cd plugins/ai-assistant && npm run lint",
+    "ai-assistant:format": "cd plugins/ai-assistant && npm run format",
     "headlamp:install": "cd headlamp/frontend && npm install && cd ../app && npm install",
     "headlamp:build": "cd headlamp && make backend && make frontend",
-    "install:all": "npm run headlamp:install && npm run plugin:install",
-    "build:all": "npm run headlamp:build && npm run plugin:build",
-    "dev": "concurrently --kill-others --names \"PLUGIN,BACKEND,FRONTEND,APP\" -c \"cyan,green,yellow,magenta\" \"npm run plugin:start\" \"cd headlamp && make run-backend\" \"cd headlamp && make run-frontend\" \"cd headlamp && make run-only-app\"",
+    "install:all": "npm run headlamp:install && npm run plugin:install && npm run ai-assistant:install",
+    "build:all": "npm run headlamp:build && npm run plugin:build && npm run ai-assistant:build",
+    "dev": "concurrently --kill-others --names \"PLUGIN,AI-ASSISTANT,BACKEND,FRONTEND,APP\" -c \"cyan,blue,green,yellow,magenta\" \"npm run plugin:start\" \"npm run ai-assistant:start\" \"cd headlamp && make run-backend\" \"cd headlamp && make run-frontend\" \"cd headlamp && make run-only-app\"",
     "prepare": "husky",
-    "knip": "knip"
+    "knip": "knip",
+    "i18n:collect": "node Localize/translation-manager.mjs collect",
+    "i18n:distribute": "node Localize/translation-manager.mjs distribute"
   },
   "config": {
     "externalTools": {
@@ -43,27 +58,54 @@
           "checksum": "ff636e82637a7768c499921188222322369584d1b6a2e85a898aba1e263d69f2"
         }
       },
+      "aksMcp": {
+        "version": "v0.0.20",
+        "darwin": {
+          "arm64": {
+            "checksum": "1104b6abfeec05de836b67f309c47bdfff4aaa1d21f78505a4a1c090a0ef5c61"
+          },
+          "amd64": {
+            "checksum": "2e7999891851fa4a974ca6c145a0f0cd7c0ae46d9cda1385ef5a4c41ff7f6e68"
+          }
+        },
+        "linux": {
+          "arm64": {
+            "checksum": "1e3adee8e044d9185a11ddb89a18a32c865c1bb8c8464037847a66f3f4825370"
+          },
+          "amd64": {
+            "checksum": "1319f728c2b11eab5b12d110d2013e5c8c22641a9bc61b6f20aaa11e6eb4a473"
+          }
+        },
+        "win32": {
+          "arm64": {
+            "checksum": "a2124eb6b702cb562a09bb2d9cfe1d44098a737e1992ea87b80f14a88805cb20"
+          },
+          "amd64": {
+            "checksum": "0aa997347a2971075c29b96ab8d943ca565c11b3ba805c605e17ebad29531a26"
+          }
+        }
+      },
       "azureCli": {
-        "version": "2.78.0",
+        "version": "2.89.0",
         "extensions": [
-          "aks-preview",
           "resource-graph",
-          "alertsmanagement"
+          "alertsmanagement",
+          "connectedk8s"
         ],
         "win32": {
-          "checksum": "37918233a753986e698ab3b2993b97a17b4458d24c2af94c05be5fa9042874ed"
+          "checksum": "fb55449e1ed1809da5408330ab2ddd52f71e50abcf53ded0d685d8315f0abb8a"
         }
       }
     }
   },
   "devDependencies": {
-    "@types/node": "^25.0.8",
+    "@types/node": "^26.1.1",
     "concurrently": "^9.1.2",
     "husky": "^9.0.0",
-    "knip": "^5.80.2",
-    "lint-staged": "^16.2.7",
-    "tsx": "^4.21.0",
-    "typescript": "^5.3.0"
+    "knip": "^6.24.0",
+    "lint-staged": "^17.0.8",
+    "tsx": "^4.23.1",
+    "typescript": "^6.0.3"
   },
   "lint-staged": {
     "plugins/aks-desktop/**/*.{js,jsx,ts,tsx}": [
@@ -71,6 +113,12 @@
     ],
     "plugins/aks-desktop/**/*.{js,jsx,ts,tsx,json,css,scss,md}": [
       "node .husky/format-plugin.js"
+    ],
+    "plugins/ai-assistant/**/*.{js,jsx,ts,tsx}": [
+      "node .husky/lint-ai-assistant.js"
+    ],
+    "plugins/ai-assistant/**/*.{js,jsx,ts,tsx,json,css,scss,md}": [
+      "node .husky/format-ai-assistant.js"
     ]
   },
   "repository": {
