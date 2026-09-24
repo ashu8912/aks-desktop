@@ -1,19 +1,22 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the Apache 2.0.
 
-import { AppTheme } from '@kinvolk/headlamp-plugin/lib';
+import type { AppTheme } from '@kinvolk/headlamp-plugin/lib/AppTheme';
 
 export const azureTheme: AppTheme = {
   name: 'Azure Theme',
   base: 'light',
   primary: '#3F3682', // AKS Purple - primary brand color
   secondary: '#ecebe9', // Gray neutral color
+  secondaryContrastText: '#000000',
   text: {
     primary: '#000000', // Black for maximum contrast and readability
+    // @ts-ignore todo: fix palette type so text.secondary is recognized
     secondary: '#323130', // Dark gray for secondary text
   },
   background: {
     default: '#ffffff', // Off-white for main background
+    // @ts-ignore todo: fix palette type so background.paper is recognized
     paper: '#ffffff', // White for cards/panels
     muted: '#f0f0f0', // Light gray for muted backgrounds
   },

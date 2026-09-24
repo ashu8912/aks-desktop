@@ -1,111 +1,424 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the Apache 2.0.
 
-import { Icon } from '@iconify/react';
-import {
-  Alert,
-  Autocomplete,
-  Box,
-  Button,
-  CircularProgress,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  TextField,
-  Typography,
-} from '@mui/material';
-import React, { useEffect, useState } from 'react';
+import { useTranslation } from '@kinvolk/headlamp-plugin/lib';
+import React, { useEffect, useRef, useState } from 'react';
 import { useHistory } from 'react-router-dom';
 import { useAzureAuth } from '../../hooks/useAzureAuth';
+import { useRegisteredClusters } from '../../hooks/useRegisteredClusters';
+import { trackError } from '../../telemetry';
+import { trackAksFeature } from '../../telemetry/aksFeature';
+import type { ClusterCapabilities } from '../../types/ClusterCapabilities';
 import { getAKSClusters, getSubscriptions, registerAKSCluster } from '../../utils/azure/aks';
+import { startProxy, verifyAksHybridEdgeCluster } from '../../utils/azure/aksHybridEdgeProxy';
+import { getClusterCapabilities } from '../../utils/azure/az-clusters';
+import { isExtensionInstalled } from '../../utils/azure/az-extensions';
+import { normalizeClusterName } from '../../utils/kubernetes/k8sNames';
+import {
+  getClusterSettings,
+  markAksHybridEdgeAppearance,
+  setClusterSettings,
+} from '../../utils/shared/clusterSettings';
+import type {
+  AKSCluster,
+  Subscription,
+  SubscriptionRefreshState,
+  Tenant,
+} from './RegisterAKSClusterDialogPure';
+import RegisterAKSClusterDialogPure from './RegisterAKSClusterDialogPure';
+
+interface SubscriptionListChanges {
+  /** Whether IDs or user-visible subscription metadata differ. */
+  differs: boolean;
+  /** Number of subscription IDs absent from the cached list. */
+  addedCount: number;
+}
+
+/**
+ * Compares cached and refreshed subscription snapshots without depending on list order.
+ *
+ * @param cached - Subscription snapshot returned from Azure CLI cache.
+ * @param refreshed - Subscription snapshot retrieved from Azure.
+ * @returns Whether snapshots differ and how many subscription IDs were added.
+ */
+function compareSubscriptionLists(
+  cached: Subscription[],
+  refreshed: Subscription[]
+): SubscriptionListChanges {
+  const signature = (subscription: Subscription) =>
+    JSON.stringify([
+      subscription.name,
+      subscription.state,
+      subscription.tenantId,
+      subscription.tenantName ?? '',
+    ]);
+  const cachedById = new Map(
+    cached.map(subscription => [subscription.id, signature(subscription)])
+  );
+  const refreshedById = new Map(
+    refreshed.map(subscription => [subscription.id, signature(subscription)])
+  );
+  const addedCount = [...refreshedById.keys()].filter(id => !cachedById.has(id)).length;
+  const differs =
+    cachedById.size !== refreshedById.size ||
+    [...refreshedById].some(([id, value]) => cachedById.get(id) !== value);
+  return { differs, addedCount };
+}
+
+/**
+ * Records a cluster-registration lifecycle status without disrupting the dialog.
+ *
+ * @param status - Registration lifecycle status to record.
+ * @returns Nothing.
+ */
+function safelyTrackAksFeature(status: 'failed' | 'started' | 'succeeded') {
+  try {
+    trackAksFeature('aksd.cluster-add', status);
+  } catch {}
+}
+
+/**
+ * Records a privacy-safe registration error without disrupting the dialog.
+ *
+ * @returns Nothing.
+ */
+function safelyTrackRegistrationError() {
+  try {
+    trackError({ area: 'cluster-add', errorClass: 'UnknownError', phase: 'failed' });
+  } catch {}
+}
 
 interface RegisterAKSClusterDialogProps {
   open: boolean;
   onClose: () => void;
   onClusterRegistered?: () => void;
+  onRegistrationFinished?: (outcome: 'failed' | 'succeeded') => void;
+  onRegistrationStarted?: () => void;
 }
 
-interface Subscription {
-  id: string;
-  name: string;
-  state: string;
-}
-
-interface AKSCluster {
-  name: string;
-  resourceGroup: string;
-  location: string;
-  kubernetesVersion: string;
-  provisioningState: string;
+/**
+ * Clears registration loading state while the dialog is still mounted.
+ *
+ * @param isMounted - Whether the dialog can still accept state updates.
+ * @param setLoading - React state setter for the registration loading state.
+ * @returns Nothing.
+ */
+function finishRegistration(
+  isMounted: boolean,
+  setLoading: React.Dispatch<React.SetStateAction<boolean>>
+): void {
+  if (isMounted) {
+    setLoading(false);
+  }
 }
 
 export default function RegisterAKSClusterDialog({
   open,
   onClose,
   onClusterRegistered,
+  onRegistrationFinished,
+  onRegistrationStarted,
 }: RegisterAKSClusterDialogProps) {
   const history = useHistory();
+  const { t } = useTranslation();
   const authStatus = useAzureAuth();
+  const { registeredClusters, isReady: registeredClustersReady } = useRegisteredClusters();
   const [loading, setLoading] = useState(false);
   const [loadingSubscriptions, setLoadingSubscriptions] = useState(false);
+  const [subscriptionRefresh, setSubscriptionRefresh] = useState<SubscriptionRefreshState>({
+    status: 'idle',
+    addedCount: 0,
+  });
   const [loadingClusters, setLoadingClusters] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [success, setSuccess] = useState('');
+  const [registrationSucceeded, setRegistrationSucceeded] = useState(false);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [selectedSubscription, setSelectedSubscription] = useState<Subscription | null>(null);
+  const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
+  const [tenantInputValue, setTenantInputValue] = useState('');
   const [clusters, setClusters] = useState<AKSCluster[]>([]);
   const [selectedCluster, setSelectedCluster] = useState<AKSCluster | null>(null);
+  const [subscriptionInputValue, setSubscriptionInputValue] = useState('');
+  const [clusterInputValue, setClusterInputValue] = useState('');
+  const [capabilities, setCapabilities] = useState<ClusterCapabilities | null>(null);
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
+  const isMountedRef = useRef(true);
+  const selectedSubscriptionRef = useRef<Subscription | null>(null);
+  const selectedTenantRef = useRef<Tenant | null>(null);
+  selectedSubscriptionRef.current = selectedSubscription;
+  selectedTenantRef.current = selectedTenant;
+
+  /**
+   * Updates the selected tenant and its refresh-safe reference together.
+   *
+   * @param value - Tenant to select, or `null` to clear the selection.
+   * @returns Nothing.
+   */
+  const updateSelectedTenant = (value: Tenant | null) => {
+    selectedTenantRef.current = value;
+    setSelectedTenant(value);
+  };
+
+  /**
+   * Updates the selected subscription and its refresh-safe reference together.
+   *
+   * @param value - Subscription to select, or `null` to clear the selection.
+   * @returns Nothing.
+   */
+  const updateSelectedSubscription = (value: Subscription | null) => {
+    selectedSubscriptionRef.current = value;
+    setSelectedSubscription(value);
+  };
+  /** Identifies the latest cluster-list request so stale responses are ignored. */
+  const clusterRequestIdRef = useRef(0);
+  /** Identifies the latest capability request so stale responses are ignored. */
+  const capabilityRequestIdRef = useRef(0);
+  /** Identifies the active registration so closed sessions cannot update state. */
+  const registrationRequestIdRef = useRef(0);
+  /** Synchronous guard for repeated submissions before loading state renders. */
+  const registrationInFlightRef = useRef(false);
+
+  /** Helper function to filter options by name substring match, ranking prefix matches first. */
+  function rankNameMatches<T extends { name: string }>(options: T[], inputValue: string): T[] {
+    const query = inputValue.trim().toLowerCase();
+    if (!query) return options;
+    return options
+      .filter(o => o.name.toLowerCase().includes(query))
+      .sort((a, b) => {
+        const ai = a.name.toLowerCase().indexOf(query);
+        const bi = b.name.toLowerCase().indexOf(query);
+        return ai !== bi ? ai - bi : a.name.localeCompare(b.name);
+      });
+  }
+
+  /** Extract unique, sorted list of tenants that own the available subscriptions. */
+  function extractTenants(subs: Subscription[]): Tenant[] {
+    const byId = new Map<string, Tenant>();
+    for (const sub of subs) {
+      if (sub.tenantId && !byId.has(sub.tenantId)) {
+        byId.set(sub.tenantId, { id: sub.tenantId, name: sub.tenantName || sub.tenantId });
+      }
+    }
+    const uniqueTenants = Array.from(byId.values());
+    return uniqueTenants.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  const resetClusterState = () => {
+    clusterRequestIdRef.current++;
+    capabilityRequestIdRef.current++;
+    setLoadingClusters(false);
+    setClusters([]);
+    setSelectedCluster(null);
+    setClusterInputValue('');
+    setCapabilities(null);
+    setCapabilitiesLoading(false);
+  };
 
   useEffect(() => {
-    if (open && authStatus.isLoggedIn) {
-      loadSubscriptions();
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      clusterRequestIdRef.current++;
+      capabilityRequestIdRef.current++;
+      registrationRequestIdRef.current++;
+      registrationInFlightRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      clusterRequestIdRef.current++;
+      capabilityRequestIdRef.current++;
+      registrationRequestIdRef.current++;
+      setLoading(registrationInFlightRef.current);
+      setLoadingSubscriptions(false);
+      setSubscriptionRefresh({ status: 'idle', addedCount: 0 });
+      setLoadingClusters(false);
+      setCapabilitiesLoading(false);
+      setError('');
+      setSuccess('');
+      setSubscriptionRefresh({ status: 'idle', addedCount: 0 });
+      setRegistrationSucceeded(false);
+      setSubscriptions([]);
+      updateSelectedSubscription(null);
+      updateSelectedTenant(null);
+      setTenantInputValue('');
+      setClusters([]);
+      setSelectedCluster(null);
+      setSubscriptionInputValue('');
+      setClusterInputValue('');
+      setCapabilities(null);
     }
-  }, [open, authStatus.isLoggedIn]);
+  }, [open]);
+
+  useEffect(() => {
+    let active = true;
+    if (open && authStatus.isLoggedIn) {
+      clusterRequestIdRef.current++;
+      capabilityRequestIdRef.current++;
+      registrationRequestIdRef.current++;
+      setLoading(registrationInFlightRef.current);
+      setError('');
+      setSuccess('');
+      setSubscriptions([]);
+      updateSelectedSubscription(null);
+      updateSelectedTenant(null);
+      setTenantInputValue('');
+      setSubscriptionInputValue('');
+      setClusters([]);
+      setSelectedCluster(null);
+      setClusterInputValue('');
+      setCapabilities(null);
+      setCapabilitiesLoading(false);
+      loadSubscriptions(() => active);
+    } else {
+      setLoadingSubscriptions(false);
+      if (open) {
+        clusterRequestIdRef.current++;
+        capabilityRequestIdRef.current++;
+        registrationRequestIdRef.current++;
+        setLoading(registrationInFlightRef.current);
+        setError('');
+        setSuccess('');
+        setSubscriptionRefresh({ status: 'idle', addedCount: 0 });
+        setSubscriptions([]);
+        updateSelectedSubscription(null);
+        updateSelectedTenant(null);
+        setTenantInputValue('');
+        setSubscriptionInputValue('');
+        setClusters([]);
+        setSelectedCluster(null);
+        setClusterInputValue('');
+        setCapabilities(null);
+        setCapabilitiesLoading(false);
+      }
+    }
+    return () => {
+      active = false;
+    };
+  }, [
+    open,
+    authStatus.isLoggedIn,
+    authStatus.subscriptionId,
+    authStatus.tenantId,
+    authStatus.username,
+  ]);
 
   useEffect(() => {
     if (selectedSubscription) {
       loadClusters(selectedSubscription.id);
     } else {
+      clusterRequestIdRef.current++;
+      setLoadingClusters(false);
       setClusters([]);
       setSelectedCluster(null);
     }
   }, [selectedSubscription]);
 
-  const loadSubscriptions = async () => {
+  const loadSubscriptions = async (isCurrent: () => boolean) => {
     setLoadingSubscriptions(true);
+    setSubscriptionRefresh({ status: 'idle', addedCount: 0 });
     setError('');
+    let cached: Subscription[];
 
     try {
       const result = await getSubscriptions();
 
-      if (!result.success) {
-        setError(result.message);
+      if (!isCurrent()) {
         return;
       }
 
-      setSubscriptions(result.subscriptions || []);
+      if (!result.success) {
+        setError(result.message);
+        setLoadingSubscriptions(false);
+        return;
+      }
+
+      cached = result.subscriptions || [];
+      setSubscriptions(cached);
+
+      // Auto-select tenant when all subscriptions belong to the same tenant.
+      const uniqueTenants = extractTenants(cached);
+      if (uniqueTenants.length === 1) {
+        updateSelectedTenant(uniqueTenants[0]);
+        setTenantInputValue(uniqueTenants[0].name);
+      }
 
       // Auto-select if only one subscription
-      if (result.subscriptions && result.subscriptions.length === 1) {
-        setSelectedSubscription(result.subscriptions[0]);
+      if (cached.length === 1) {
+        const sub = cached[0];
+        updateSelectedSubscription(sub);
+        setSubscriptionInputValue(`${sub.name}${sub.state !== 'Enabled' ? ` (${sub.state})` : ''}`);
       }
     } catch (err) {
+      if (!isCurrent()) {
+        return;
+      }
       console.error('Error loading subscriptions:', err);
-      setError('Failed to load subscriptions');
-    } finally {
+      setError(t('Failed to load subscriptions'));
       setLoadingSubscriptions(false);
+      return;
+    }
+
+    if (!isCurrent()) return;
+    setLoadingSubscriptions(false);
+    setSubscriptionRefresh({ status: 'refreshing', addedCount: 0 });
+
+    try {
+      const refreshedResult = await getSubscriptions(true);
+      if (!isCurrent()) return;
+      if (!refreshedResult.success) {
+        setSubscriptionRefresh({ status: 'failed', addedCount: 0 });
+        return;
+      }
+
+      const refreshed = refreshedResult.subscriptions || [];
+      const changes = compareSubscriptionLists(cached, refreshed);
+      if (!changes.differs) {
+        setSubscriptionRefresh({ status: 'idle', addedCount: 0 });
+        return;
+      }
+
+      setSubscriptions(refreshed);
+      const currentTenant = selectedTenantRef.current;
+      if (currentTenant && !refreshed.some(sub => sub.tenantId === currentTenant.id)) {
+        updateSelectedTenant(null);
+        setTenantInputValue('');
+      }
+      const currentSubscription = selectedSubscriptionRef.current;
+      if (currentSubscription) {
+        const replacement = refreshed.find(sub => sub.id === currentSubscription.id) ?? null;
+        updateSelectedSubscription(replacement);
+        if (!replacement) {
+          setSubscriptionInputValue('');
+          resetClusterState();
+        }
+      }
+      setSubscriptionRefresh({ status: 'updated', addedCount: changes.addedCount });
+    } catch (err) {
+      if (!isCurrent()) return;
+      console.warn('Failed to refresh Azure subscriptions:', err);
+      setSubscriptionRefresh({ status: 'failed', addedCount: 0 });
     }
   };
 
   const loadClusters = async (subscriptionId: string) => {
+    const requestId = ++clusterRequestIdRef.current;
     setLoadingClusters(true);
     setError('');
+    setNotice('');
     setClusters([]);
     setSelectedCluster(null);
+    setClusterInputValue('');
 
     try {
       const result = await getAKSClusters(subscriptionId);
+
+      if (requestId !== clusterRequestIdRef.current) {
+        return;
+      }
 
       if (!result.success) {
         setError(result.message);
@@ -113,24 +426,240 @@ export default function RegisterAKSClusterDialog({
       }
 
       setClusters(result.clusters || []);
+      // Without saying so, a missing extension looks like a subscription with no
+      // Arc clusters, and the install guidance sits behind a cluster that cannot
+      // be selected.
+      const arcDiscoveryIssue = result.arcDiscoveryUnavailable;
+      setNotice(
+        arcDiscoveryIssue === 'connectedk8s-extension-missing'
+          ? t(
+              'AKS Hybrid & Edge clusters are not listed: the Azure CLI "connectedk8s" extension is required. Install it with: az extension add --name connectedk8s'
+            )
+          : arcDiscoveryIssue || ''
+      );
     } catch (err) {
+      if (requestId !== clusterRequestIdRef.current) {
+        return;
+      }
       console.error('Error loading AKS clusters:', err);
-      setError('Failed to load AKS clusters');
+      setError(t('Failed to load AKS clusters'));
     } finally {
-      setLoadingClusters(false);
+      if (requestId === clusterRequestIdRef.current) {
+        setLoadingClusters(false);
+      }
+    }
+  };
+
+  const tenants = React.useMemo(() => extractTenants(subscriptions), [subscriptions]);
+
+  const tenantScopedSubscriptions = React.useMemo(() => {
+    return selectedTenant
+      ? subscriptions.filter(sub => sub.tenantId === selectedTenant.id)
+      : subscriptions;
+  }, [subscriptions, selectedTenant]);
+
+  const filteredSubscriptions = React.useMemo(() => {
+    return selectedSubscription
+      ? tenantScopedSubscriptions
+      : rankNameMatches(tenantScopedSubscriptions, subscriptionInputValue);
+  }, [tenantScopedSubscriptions, subscriptionInputValue, selectedSubscription]);
+
+  const filteredClusters = React.useMemo(() => {
+    return rankNameMatches(clusters, clusterInputValue);
+  }, [clusters, clusterInputValue]);
+
+  const handleTenantChange = (_event: React.SyntheticEvent, value: Tenant | null) => {
+    updateSelectedTenant(value);
+    setTenantInputValue(value ? value.name : '');
+    updateSelectedSubscription(null);
+    setSubscriptionInputValue('');
+    resetClusterState();
+  };
+
+  const handleTenantInputChange = (_event: React.SyntheticEvent, value: string, reason: string) => {
+    if (reason === 'input' || reason === 'clear') {
+      setTenantInputValue(value);
+      if (reason === 'clear') {
+        updateSelectedTenant(null);
+        updateSelectedSubscription(null);
+        setSubscriptionInputValue('');
+        resetClusterState();
+      }
     }
   };
 
   const handleSubscriptionChange = (event: React.SyntheticEvent, value: Subscription | null) => {
-    setSelectedSubscription(value);
+    updateSelectedSubscription(value);
+    setSubscriptionInputValue(
+      value ? `${value.name}${value.state !== 'Enabled' ? ` (${value.state})` : ''}` : ''
+    );
+    resetClusterState();
   };
 
-  const handleClusterChange = (event: React.SyntheticEvent, value: AKSCluster | null) => {
+  const handleSubscriptionInputChange = (
+    _event: React.SyntheticEvent,
+    value: string,
+    reason: string
+  ) => {
+    if (reason === 'input' || reason === 'clear') {
+      setSubscriptionInputValue(value);
+      updateSelectedSubscription(null);
+      resetClusterState();
+    }
+  };
+
+  const handleClusterChange = (_event: React.SyntheticEvent, value: AKSCluster | null) => {
+    capabilityRequestIdRef.current++;
     setSelectedCluster(value);
+    setClusterInputValue(value ? value.name : '');
+    setCapabilities(null);
+    setCapabilitiesLoading(false);
+  };
+
+  const handleClusterInputChange = (
+    _event: React.SyntheticEvent,
+    value: string,
+    reason: string
+  ) => {
+    if (reason === 'input' || reason === 'clear') {
+      capabilityRequestIdRef.current++;
+      setClusterInputValue(value);
+      setSelectedCluster(null);
+      setCapabilities(null);
+      setCapabilitiesLoading(false);
+    }
+  };
+
+  /**
+   * Connects an Arc cluster through the shared `az connectedk8s proxy` daemon.
+   *
+   * @returns Whether the cluster was connected and verified successfully.
+   */
+  const handleAksHybridEdgeRegister = async (): Promise<boolean> => {
+    if (!selectedCluster || !selectedSubscription) {
+      return false;
+    }
+
+    setLoading(true);
+    setError('');
+    setSuccess('');
+
+    const target = {
+      subscriptionId: selectedSubscription.id,
+      resourceGroup: selectedCluster.resourceGroup,
+      clusterName: selectedCluster.name,
+    };
+
+    try {
+      // The proxy is driven by the `connectedk8s` Azure CLI extension.
+      const ext = await isExtensionInstalled('connectedk8s');
+      if (!ext.installed) {
+        // Surface the underlying reason when the check failed for something other
+        // than a missing extension (e.g. "Authentication required…"), so a
+        // login/CLI failure isn't masked by the generic install message.
+        setError(
+          ext.error ||
+            t(
+              'The Azure CLI "connectedk8s" extension is required for AKS Hybrid & Edge clusters. Install it with: az extension add --name connectedk8s'
+            )
+        );
+        finishRegistration(isMountedRef.current, setLoading);
+        return false;
+      }
+
+      const startResult = await startProxy(target);
+
+      if (!startResult.success) {
+        setError(
+          t('Failed to connect to the AKS Hybrid & Edge cluster: {{message}}', {
+            message: startResult.error || t('Unknown error'),
+          })
+        );
+        finishRegistration(isMountedRef.current, setLoading);
+        return false;
+      }
+
+      // Confirm the cluster actually answers through the proxy. If it doesn't,
+      // the cluster is typically stopped or its Azure Arc agents aren't running
+      // — but surface the underlying proxy/probe error so a genuine failure
+      // (extension, auth, spawn error) isn't masked as "cluster offline".
+      const verify = await verifyAksHybridEdgeCluster(selectedCluster.name, {
+        target: {
+          subscriptionId: target.subscriptionId,
+          resourceGroup: target.resourceGroup,
+        },
+      });
+      if (!verify.success) {
+        console.error('[AKS] AKS Hybrid & Edge verify failed:', verify);
+        // Proxy left running on purpose — the arcProxy daemon is shared with any
+        // other connected cluster. Cleaned up on app quit.
+        setError(
+          t(
+            "Cluster '{{cluster}}' was added, but it did not become reachable. Details: {{message}}",
+            { cluster: selectedCluster.name, message: verify.error || t('Unknown error') }
+          )
+        );
+        finishRegistration(isMountedRef.current, setLoading);
+        return false;
+      }
+
+      // Persist metadata so the cluster is recognised as AKS Hybrid & Edge in the list
+      // view and by the proxy actions.
+      const existing = getClusterSettings(selectedCluster.name);
+      setClusterSettings(selectedCluster.name, {
+        ...existing,
+        clusterType: 'aksarc',
+        subscriptionId: selectedSubscription.id,
+        resourceGroup: selectedCluster.resourceGroup,
+      });
+      // Give the cluster a distinct name badge (server icon + Azure-blue accent)
+      // on the Home table, so AKS Hybrid & Edge clusters stand out next to their name.
+      markAksHybridEdgeAppearance(selectedCluster.name);
+
+      finishRegistration(isMountedRef.current, setLoading);
+      setRegistrationSucceeded(true);
+      setSuccess(
+        t("Cluster '{{cluster}}' successfully connected", {
+          cluster: selectedCluster.name,
+        })
+      );
+      onClusterRegistered?.();
+      return true;
+    } catch (err) {
+      console.error('Error connecting AKS Hybrid & Edge cluster:', err);
+      setError(
+        t('Failed to connect to the AKS Hybrid & Edge cluster: {{message}}', {
+          message: err instanceof Error ? err.message : t('Unknown error'),
+        })
+      );
+      finishRegistration(isMountedRef.current, setLoading);
+      return false;
+    }
   };
 
   const handleRegister = async () => {
-    if (!selectedCluster || !selectedSubscription) {
+    if (
+      registrationInFlightRef.current ||
+      registrationSucceeded ||
+      !registeredClustersReady ||
+      !selectedCluster ||
+      !selectedSubscription
+    ) {
+      return;
+    }
+    registrationInFlightRef.current = true;
+    const registrationRequestId = ++registrationRequestIdRef.current;
+
+    onRegistrationStarted?.();
+    safelyTrackAksFeature('started');
+    if (selectedCluster.clusterType === 'aksarc') {
+      const succeeded = await handleAksHybridEdgeRegister();
+      registrationInFlightRef.current = false;
+      safelyTrackAksFeature(succeeded ? 'succeeded' : 'failed');
+      if (!succeeded) {
+        safelyTrackRegistrationError();
+      }
+      onRegistrationFinished?.(succeeded ? 'succeeded' : 'failed');
       return;
     }
 
@@ -138,213 +667,152 @@ export default function RegisterAKSClusterDialog({
     setError('');
     setSuccess('');
 
+    let result: Awaited<ReturnType<typeof registerAKSCluster>>;
     try {
       // Register the cluster by running az aks get-credentials and setting up kubeconfig
-      console.log('[AKS] Registering cluster...');
-      const result = await registerAKSCluster(
+      result = await registerAKSCluster(
         selectedSubscription.id,
         selectedCluster.resourceGroup,
-        selectedCluster.name
+        selectedCluster.name,
+        undefined,
+        registeredClusters.has(normalizeClusterName(selectedCluster.name))
       );
-
-      if (!result.success) {
-        setError(result.message);
-        setLoading(false);
+      if (registrationRequestId !== registrationRequestIdRef.current) {
         return;
       }
-
-      console.log('[AKS] Cluster registered successfully:', result.message);
-      setLoading(false);
-
-      // Show success message with cluster name
-      setSuccess(`Cluster '${selectedCluster.name}' successfully merged in kubeconfig`);
-
-      onClusterRegistered?.();
-
-      // Navigate and reload to show cluster list with newly merged cluster
-      onClose();
-      history.replace('/');
-      window.location.reload();
     } catch (err) {
+      if (registrationRequestId !== registrationRequestIdRef.current) {
+        return;
+      }
       console.error('Error registering AKS cluster:', err);
       setError(
-        `Failed to register cluster: ${err instanceof Error ? err.message : 'Unknown error'}`
+        t('Failed to register cluster: {{message}}', {
+          message: err instanceof Error ? err.message : t('Unknown error'),
+        })
       );
       setLoading(false);
+      safelyTrackAksFeature('failed');
+      safelyTrackRegistrationError();
+      onRegistrationFinished?.('failed');
+      return;
+    } finally {
+      registrationInFlightRef.current = false;
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
+    }
+
+    if (!result.success) {
+      setError(result.message);
+      setLoading(false);
+      safelyTrackAksFeature('failed');
+      safelyTrackRegistrationError();
+      onRegistrationFinished?.('failed');
+      return;
+    }
+
+    safelyTrackAksFeature('succeeded');
+    onRegistrationFinished?.('succeeded');
+    setLoading(false);
+    setRegistrationSucceeded(true);
+
+    // Show success message with cluster name
+    setSuccess(
+      t("Cluster '{{cluster}}' successfully merged in kubeconfig", {
+        cluster: selectedCluster.name,
+      })
+    );
+
+    onClusterRegistered?.();
+
+    // Check cluster capabilities (non-blocking)
+    const capabilityRequestId = ++capabilityRequestIdRef.current;
+    setCapabilitiesLoading(true);
+    try {
+      const caps = await getClusterCapabilities({
+        subscriptionId: selectedSubscription.id,
+        resourceGroup: selectedCluster.resourceGroup,
+        clusterName: selectedCluster.name,
+      });
+      if (isMountedRef.current && capabilityRequestId === capabilityRequestIdRef.current) {
+        setCapabilities(caps);
+      }
+    } catch {
+      // Non-critical — just don't show capabilities
+    } finally {
+      if (isMountedRef.current && capabilityRequestId === capabilityRequestIdRef.current) {
+        setCapabilitiesLoading(false);
+      }
     }
   };
 
   const handleClose = () => {
-    if (!loading) {
+    if (!loading && !registrationInFlightRef.current && !registrationSucceeded) {
       onClose();
     }
   };
 
+  const handleDone = () => {
+    onClose();
+    history.replace('/');
+    window.location.reload();
+  };
+
+  const handleConfigured = () => {
+    if (selectedSubscription && selectedCluster) {
+      const capabilityRequestId = ++capabilityRequestIdRef.current;
+      getClusterCapabilities({
+        subscriptionId: selectedSubscription.id,
+        resourceGroup: selectedCluster.resourceGroup,
+        clusterName: selectedCluster.name,
+      })
+        .then(caps => {
+          if (isMountedRef.current && capabilityRequestId === capabilityRequestIdRef.current) {
+            setCapabilities(caps);
+          }
+        })
+        .catch(() => {});
+    }
+  };
+
   return (
-    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-      <DialogTitle>
-        <Box display="flex" alignItems="center" gap={1}>
-          <Icon icon="logos:microsoft-azure" style={{ fontSize: '24px' }} />
-          <Typography variant="h6">Register AKS Cluster</Typography>
-        </Box>
-      </DialogTitle>
-
-      <DialogContent>
-        <Box display="flex" flexDirection="column" gap={2} pt={1}>
-          {error && (
-            <Alert severity="error" onClose={() => setError('')}>
-              {error}
-            </Alert>
-          )}
-
-          {success && (
-            <Alert severity="success" onClose={() => setSuccess('')}>
-              {success}
-            </Alert>
-          )}
-
-          {!authStatus.isLoggedIn && (
-            <Alert severity="warning">
-              You need to be logged in to Azure to register AKS clusters.
-            </Alert>
-          )}
-
-          {authStatus.isLoggedIn && (
-            <>
-              <Autocomplete
-                fullWidth
-                options={subscriptions}
-                value={selectedSubscription}
-                onChange={handleSubscriptionChange}
-                getOptionLabel={option =>
-                  `${option.name}${option.state !== 'Enabled' ? ` (${option.state})` : ''}`
-                }
-                isOptionEqualToValue={(option, value) => option.id === value.id}
-                disabled={loadingSubscriptions}
-                loading={loadingSubscriptions}
-                renderInput={params => (
-                  <TextField
-                    {...params}
-                    label="Subscription"
-                    placeholder="Select an Azure subscription"
-                    InputProps={{
-                      ...params.InputProps,
-                      endAdornment: (
-                        <>
-                          {loadingSubscriptions ? (
-                            <CircularProgress color="inherit" size={20} />
-                          ) : null}
-                          {params.InputProps.endAdornment}
-                        </>
-                      ),
-                    }}
-                  />
-                )}
-                renderOption={(props, option) => (
-                  <li {...props} key={option.id}>
-                    <Box>
-                      <Typography variant="body1">{option.name}</Typography>
-                      {option.state !== 'Enabled' && (
-                        <Typography variant="caption" color="textSecondary">
-                          {option.state}
-                        </Typography>
-                      )}
-                    </Box>
-                  </li>
-                )}
-              />
-
-              {loadingSubscriptions && (
-                <Box display="flex" alignItems="center" gap={1}>
-                  <CircularProgress size={20} />
-                  <Typography variant="body2" color="textSecondary">
-                    Loading subscriptions...
-                  </Typography>
-                </Box>
-              )}
-
-              {loadingClusters && (
-                <Box display="flex" alignItems="center" gap={1}>
-                  <CircularProgress size={20} />
-                  <Typography variant="body2" color="textSecondary">
-                    Loading AKS clusters...
-                  </Typography>
-                </Box>
-              )}
-
-              {!loadingClusters && selectedSubscription && clusters.length === 0 && (
-                <Alert severity="info">No AKS clusters found in this subscription.</Alert>
-              )}
-
-              {!loadingClusters && selectedSubscription && clusters.length > 0 && (
-                <Autocomplete
-                  fullWidth
-                  options={clusters}
-                  value={selectedCluster}
-                  onChange={handleClusterChange}
-                  getOptionLabel={option => option.name}
-                  isOptionEqualToValue={(option, value) => option.name === value.name}
-                  renderInput={params => (
-                    <TextField
-                      {...params}
-                      label="AKS Cluster"
-                      placeholder="Select an AKS cluster"
-                    />
-                  )}
-                  renderOption={(props, option) => (
-                    <li {...props} key={option.name}>
-                      <Box width="100%">
-                        <Typography variant="body1">{option.name}</Typography>
-                        <Typography variant="caption" color="textSecondary">
-                          {option.location} • v{option.kubernetesVersion} •{' '}
-                          {option.provisioningState}
-                        </Typography>
-                      </Box>
-                    </li>
-                  )}
-                />
-              )}
-
-              {selectedCluster && !success && (
-                <Box p={2} bgcolor="action.hover" borderRadius={1}>
-                  <Typography variant="subtitle2" gutterBottom>
-                    Selected Cluster Details
-                  </Typography>
-                  <Typography variant="body2">
-                    <strong>Name:</strong> {selectedCluster.name}
-                  </Typography>
-                  <Typography variant="body2">
-                    <strong>Resource Group:</strong> {selectedCluster.resourceGroup}
-                  </Typography>
-                  <Typography variant="body2">
-                    <strong>Location:</strong> {selectedCluster.location}
-                  </Typography>
-                  <Typography variant="body2">
-                    <strong>Kubernetes Version:</strong> {selectedCluster.kubernetesVersion}
-                  </Typography>
-                </Box>
-              )}
-            </>
-          )}
-        </Box>
-      </DialogContent>
-
-      <DialogActions>
-        <Button onClick={handleClose} disabled={loading}>
-          Cancel
-        </Button>
-        {!success && (
-          <Button
-            onClick={handleRegister}
-            variant="contained"
-            color="primary"
-            disabled={!selectedCluster || loading || !authStatus.isLoggedIn}
-            startIcon={loading ? <CircularProgress size={20} /> : <Icon icon="mdi:cloud-check" />}
-          >
-            {loading ? 'Registering...' : 'Register Cluster'}
-          </Button>
-        )}
-      </DialogActions>
-    </Dialog>
+    <RegisterAKSClusterDialogPure
+      open={open}
+      isChecking={authStatus.isChecking}
+      isLoggedIn={authStatus.isLoggedIn}
+      loading={loading}
+      loadingSubscriptions={loadingSubscriptions}
+      subscriptionRefresh={subscriptionRefresh}
+      loadingClusters={loadingClusters}
+      capabilitiesLoading={capabilitiesLoading}
+      error={error}
+      success={success}
+      registrationSucceeded={registrationSucceeded}
+      clusterConfigReady={registeredClustersReady}
+      subscriptions={filteredSubscriptions}
+      selectedSubscription={selectedSubscription}
+      subscriptionInputValue={subscriptionInputValue}
+      tenants={tenants}
+      selectedTenant={selectedTenant}
+      tenantInputValue={tenantInputValue}
+      clusters={clusters}
+      filteredClusters={filteredClusters}
+      selectedCluster={selectedCluster}
+      clusterInputValue={clusterInputValue}
+      capabilities={capabilities}
+      onClose={handleClose}
+      onSubscriptionChange={handleSubscriptionChange}
+      onSubscriptionInputChange={handleSubscriptionInputChange}
+      onTenantChange={handleTenantChange}
+      onTenantInputChange={handleTenantInputChange}
+      onClusterChange={handleClusterChange}
+      onClusterInputChange={handleClusterInputChange}
+      notice={notice}
+      onRegister={handleRegister}
+      onDone={handleDone}
+      onDismissError={() => setError('')}
+      onDismissSuccess={() => setSuccess('')}
+      onConfigured={handleConfigured}
+    />
   );
 }

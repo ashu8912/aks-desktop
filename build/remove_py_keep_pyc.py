@@ -9,7 +9,6 @@ Based on Azure CLI's build.cmd script.
 import os
 import shutil
 import sys
-from pathlib import Path
 
 def process_pyc_files(site_packages):
     """

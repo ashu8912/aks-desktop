@@ -12,11 +12,12 @@ This script is bundled with AKS desktop and automatically uses the
 bundled Azure CLI installation.
 
 Usage:
-    python az-kubelogin.py --server-id <server-id> [--resource <resource>]
+    python az-kubelogin.py --server-id <server-id> [--resource <resource>] [--tenant <tenant-id>]
 
 Arguments:
     --server-id: The Azure AD server ID (default: 6dae42f8-4368-4678-94ff-3960e28e3630)
     --resource: The Kubernetes API server resource (optional)
+    --tenant: The Azure AD tenant ID (optional, ensures correct token in multi-tenant scenarios)
 
 Environment Variables:
     AZ_CLI_PATH: Path to the az CLI command (defaults to 'az' in PATH)
@@ -45,13 +46,14 @@ from datetime import datetime, timezone
 from typing import Dict
 
 
-def get_azure_token(server_id: str, resource: str = None) -> Dict:
+def get_azure_token(server_id: str, resource: str = None, tenant: str = None) -> Dict:
     """
     Get an access token from Azure CLI.
 
     Args:
         server_id: The Azure AD server ID
         resource: Optional Kubernetes API server resource
+        tenant: Optional Azure AD tenant ID to request the token from
 
     Returns:
         Dictionary containing the Azure CLI token response
@@ -68,6 +70,10 @@ def get_azure_token(server_id: str, resource: str = None) -> Dict:
 
     # Build the az command
     cmd = [az_cmd, "account", "get-access-token", "--scope", scope]
+
+    # Add tenant parameter if provided (ensures correct token in multi-tenant scenarios)
+    if tenant:
+        cmd.extend(["--tenant", tenant])
 
     # Add resource parameter if provided
     if resource:
@@ -158,11 +164,16 @@ def main():
         help="Kubernetes API server resource (optional)"
     )
 
+    parser.add_argument(
+        "--tenant",
+        help="Azure AD tenant ID (optional, ensures correct token in multi-tenant scenarios)"
+    )
+
     args = parser.parse_args()
 
     try:
         # Get the token from Azure CLI
-        az_token = get_azure_token(args.server_id, args.resource)
+        az_token = get_azure_token(args.server_id, args.resource, args.tenant)
 
         # Convert to ExecCredential format
         exec_credential = convert_to_exec_credential(az_token)

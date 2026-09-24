@@ -2,24 +2,26 @@
 // Licensed under the Apache 2.0.
 
 /**
- * Azure CLI utilities test - Jest compatible
+ * Azure CLI utilities test - Vitest compatible
  */
+
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 interface MockChildProcess {
   stdout: {
-    on: jest.Mock;
+    on: ReturnType<typeof vi.fn>;
   };
   stderr: {
-    on: jest.Mock;
+    on: ReturnType<typeof vi.fn>;
   };
-  on: jest.Mock;
+  on: ReturnType<typeof vi.fn>;
 }
 
 // Mock the headlamp plugin
-const mockRunCommand = jest.fn();
+const mockRunCommand = vi.hoisted(() => vi.fn());
 
 // Mock the headlamp plugin module
-jest.mock('@kinvolk/headlamp-plugin/lib', () => ({
+vi.mock('@kinvolk/headlamp-plugin/lib', () => ({
   runCommand: mockRunCommand,
 }));
 
@@ -66,20 +68,20 @@ const { isAzCliInstalled, isAzCliLoggedIn } = mockAzCliFunctions;
 // Test helper function
 const createMockChildProcess = (stdoutData: string, stderrData: string = ''): MockChildProcess => ({
   stdout: {
-    on: jest.fn((event: string, callback: (data: string) => void) => {
+    on: vi.fn((event: string, callback: (data: string) => void) => {
       if (event === 'data') {
         callback(stdoutData);
       }
     }),
   },
   stderr: {
-    on: jest.fn((event: string, callback: (data: string) => void) => {
+    on: vi.fn((event: string, callback: (data: string) => void) => {
       if (event === 'data') {
         callback(stderrData);
       }
     }),
   },
-  on: jest.fn((event: string, callback: () => void) => {
+  on: vi.fn((event: string, callback: () => void) => {
     if (event === 'exit') {
       callback();
     }

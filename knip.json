@@ -1,68 +1,60 @@
 {
   "$schema": "./node_modules/knip/schema.json",
-  "entry": [
-    "plugins/aks-desktop/src/index.tsx"
-  ],
-  "ignoreDependencies": [
-    "jest-environment-jsdom",
-    "babel-jest",
-    "ts-jest",
-    "identity-obj-proxy",
-    "tsx"
-  ],
   "ignoreBinaries": [
     "make"
   ],
-  "ignoreIssues": {
-    "build/setup-plugins.ts": [
-      "files"
-    ],
-    "build/verify-bundled-tools.ts": [
-      "files"
-    ],
-    "build/download-az-cli.ts": [
-      "files"
-    ],
-    "build/setup-external-tools.ts": [
-      "files"
-    ],
-    "plugins/aks-desktop/src/**/*.d.ts": [
-      "files"
-    ],
-    "plugins/aks-desktop/src/setupTests.ts": [
-      "files"
-    ],
-    "plugins/aks-desktop/test-config/setup/setupTests.ts": [
-      "files"
-    ],
-    "plugins/aks-desktop/src/utils/test/*.test.ts": [
-      "files"
-    ],
-    "plugins/aks-desktop/src/utils/test/run-tests.js": [
-      "files"
-    ],
-    "**/*": [
-      "unlisted"
-    ]
+  "workspaces": {
+    ".": {
+      "entry": [
+        "build/*.ts"
+      ],
+      "project": [
+        "build/**/*.ts"
+      ]
+    },
+    "plugins/aks-desktop": {
+      "entry": [
+        "src/index.tsx",
+        "src/**/*.stories.{ts,tsx}",
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.guidepup.test.{ts,tsx}",
+        "src/utils/azure/**/*.ts"
+      ],
+      "project": [
+        "src/**/*.{ts,tsx}"
+      ],
+      "ignore": [
+        "src/**/*.d.ts"
+      ],
+      "ignoreDependencies": [
+        "@azure/arm-resourcegraph",
+        "@azure/arm-subscriptions",
+        "@azure/identity",
+        "@iconify/react",
+        "@monaco-editor/react",
+        "@mui/material",
+        "@mui/utils",
+        "@storybook/react",
+        "@testing-library/jest-dom",
+        "@types/libsodium-wrappers",
+        "axe-core",
+        "eslint-plugin-no-barrel-files",
+        "i18next",
+        "react-i18next",
+        "react-router-dom"
+      ],
+      "ignoreBinaries": [
+        "prettier"
+      ]
+    }
   },
-  "project": [
-    "build/**/*.ts",
-    "plugins/aks-desktop/src/**/*.{ts,tsx}",
-    "plugins/aks-desktop/test-config/**/*.{js,ts}",
-    "plugins/aks-desktop/src/utils/test/**/*.{js,ts,tsx}"
-  ],
-  "ignore": [
-    "headlamp/.plugins/**",
-    "headlamp/app/resources/**",
-    "plugins/aks-desktop/dist/**"
+  "ignoreDependencies": [
+    "tsx"
   ],
   "ignoreExportsUsedInFile": {
     "interface": true,
     "type": true
   },
-  "jest": [
-    "plugins/aks-desktop/test-config/jest/*.js"
-  ],
   "lint-staged": true,
   "husky": true,
   "tags": [

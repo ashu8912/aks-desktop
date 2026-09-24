@@ -9,48 +9,82 @@ To learn how to get started with AKS desktop, create projects, deploy applicatio
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11652/badge)](https://www.bestpractices.dev/projects/11652)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Azure/aks-desktop/badge)](https://scorecard.dev/viewer/?uri=github.com/Azure/aks-desktop)
 
-
 ## Installation
 
 Please download the latest release for your platform from the [Releases](https://github.com/Azure/aks-desktop/releases/latest) page.
 
+## Development
 
-## How to Build
+Install Node.js 22.22.2 or newer. npm 10 and newer are supported; the repository
+uses npm 12.0.1 in CI and for lockfile maintenance.
 
-To get started with AKS desktop, follow these steps:
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Azure/aks-desktop.git
-   ```
+```bash
+npm install --global npm@12.0.1
+npm --version
+```
 
-2. Navigate to the project directory:
-   ```bash
-   cd aks-desktop
-   ```
+Using the pinned version avoids unrelated lockfile changes when updating
+dependencies.
 
-3. Install the dependencies:
-   ```bash
-   ./scripts/headlamp-submodule.sh --reset
-   npm install
-   npm run install:all
-   ```
+```bash
+npm install
+npm start
+```
 
-4. Build the project:
-   ```bash
-   npm run build
-   ```
+To build the application after installing dependencies:
 
+```bash
+npm run build
+```
+
+The default build targets the host architecture. Release targets can also be
+built explicitly with `npm run build:linux:arm64`, `npm run build:mac:arm64`,
+or `npm run build:win:arm64` on the corresponding host platform.
+
+### Build output
+
+The AKS tool setup stages `build/aks-tool-environment.cjs` beside the bundled CLI.
+The product manifest selects it as the command-environment callback, so AKS verifies
+its tool paths and digests and places them ahead of login-shell installations.
+This policy is AKS-owned; Headlamp only invokes the configured app-owned callback.
+
+After a successful build, the command prints the absolute output directory.
+Installers, archives, and unpacked applications are written under the installed
+Headlamp package, **not** a `dist/` directory at the repository root:
+
+```text
+node_modules/@headlamp-k8s/headlamp-source/source/app/dist/
+```
+
+| Platform | Packages in that directory | Unpacked application |
+| --- | --- | --- |
+| macOS | `.dmg` | `mac-arm64/AKS desktop.app` or `mac/AKS desktop.app` for x64 |
+| Windows | `.exe` installer | `win-unpacked/AKS desktop.exe` for x64 or `win-arm64-unpacked/AKS desktop.exe` |
+| Linux | `.AppImage`, `.tar.gz`, and `.deb` for x64 | `linux-unpacked/aks-desktop` for x64 or `linux-arm64-unpacked/aks-desktop` |
+
+The files at the top level are the distributable packages; the platform
+subdirectories contain unpacked builds used by `npm run test:distribution`.
+The directory can contain output from earlier builds. Copy packages elsewhere
+before cleaning or reinstalling dependencies, which can replace this generated
+source package. See [distribution validation](MAINTENANCE.md#validate-a-distribution)
+for the verification commands.
+
+## Documentation
+
+- [Cluster Requirements](docs/cluster-requirements.md) — What your AKS cluster needs for the best AKS desktop experience
+- [Headlamp source configuration](packages/headlamp-source/README.md) — `headlampSource` and `headlamp` fields
+- [Headlamp source maintenance](MAINTENANCE.md#headlamp-distribution) — Source updates and patch rebases
+- [AKS Desktop Documentation](https://aka.ms/aks/aks-desktop)
+- [AKS Managed Namespaces](https://learn.microsoft.com/en-us/azure/aks/managed-namespaces)
 
 ## Contributing
 
 Check out the [CONTRIBUTING.md](CONTRIBUTING.md) file. More
 details on how to contribute will come soon.
 
-
 ## Support
 
 See [SUPPORT.md](SUPPORT.md) for information on how to get help with this project.
-
 
 ## Trademarks
 

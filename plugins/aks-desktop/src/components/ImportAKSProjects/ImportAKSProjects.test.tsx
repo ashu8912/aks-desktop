@@ -1,0 +1,520 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the Apache 2.0.
+
+// @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import React from 'react';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+
+// ---------------------------------------------------------------------------
+// Mocks
+// ---------------------------------------------------------------------------
+
+vi.mock('@kinvolk/headlamp-plugin/lib', () => {
+  const t = (key: string, params?: Record<string, any>) => {
+    if (!params) return key;
+    let result = key;
+    for (const [k, v] of Object.entries(params)) {
+      result = result.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v));
+    }
+    return result;
+  };
+  return {
+    useTranslation: () => ({ t }),
+  };
+});
+
+vi.mock('@kinvolk/headlamp-plugin/lib/CommonComponents', () => ({
+  PageGrid: ({ children }: any) => <div data-testid="page-grid">{children}</div>,
+  ActionButton: ({ description, onClick, iconButtonProps }: any) => (
+    <button aria-label={description} onClick={onClick} {...iconButtonProps} />
+  ),
+  SectionBox: ({ children, title, headerProps }: any) => (
+    <div data-testid="section-box" data-title={title}>
+      <div data-testid="section-actions">{headerProps?.actions}</div>
+      {children}
+    </div>
+  ),
+  // Minimal Table mock: mirrors Headlamp's selected-row action gating.
+  Table: ({
+    data,
+    columns,
+    loading,
+    renderRowSelectionToolbar,
+    enableRowSelection,
+    getRowId,
+  }: any) => {
+    const [selected, setSelected] = React.useState<Set<string>>(new Set());
+
+    const fakeTable = {
+      getSelectedRowModel: () => ({
+        rows: data
+          .filter((item: any) => selected.has(getRowId(item)))
+          .map((original: any) => ({ original })),
+      }),
+    };
+
+    return (
+      <div>
+        <div data-testid="table-toolbar">
+          {selected.size > 0 && renderRowSelectionToolbar?.({ table: fakeTable })}
+        </div>
+        <table data-testid="namespace-table" data-loading={loading}>
+          <thead>
+            <tr>
+              {enableRowSelection && <th />}
+              {columns.map((c: any, i: number) => (
+                <th key={i}>{c.header}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(data ?? []).map((item: any) => {
+              const rowId = getRowId(item);
+              return (
+                <tr key={rowId} data-testid={`row-${item.name}`} data-row-id={rowId}>
+                  {enableRowSelection && (
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(rowId)}
+                        onChange={() => {
+                          const next = new Set(selected);
+                          if (next.has(rowId)) next.delete(rowId);
+                          else next.add(rowId);
+                          setSelected(next);
+                        }}
+                      />
+                    </td>
+                  )}
+                  {columns.map((col: any, j: number) => (
+                    <td key={j}>
+                      {col.Cell
+                        ? col.Cell({ row: { original: item } })
+                        : String(col.accessorFn(item))}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  },
+}));
+
+vi.mock('../AzureAuth/AzureAuthGuard', () => ({
+  default: ({ children }: any) => <div>{children}</div>,
+}));
+
+vi.mock('@iconify/react', () => ({
+  Icon: ({ icon }: any) => <span data-testid={`icon-${icon}`} />,
+}));
+
+// Mock the hook so component tests focus purely on rendering/wiring
+const mockHandleImportClick = vi.fn();
+const mockHandleConversionClose = vi.fn();
+const mockHandleConversionConfirm = vi.fn();
+const mockHandleCancel = vi.fn();
+const mockHandleGoToProjects = vi.fn();
+const mockRefresh = vi.fn();
+const mockClearError = vi.fn();
+const mockClearSuccess = vi.fn();
+const mockClearDiscoveryError = vi.fn();
+
+let mockHookReturn: any;
+
+vi.mock('./hooks/useImportAKSProjects', () => ({
+  useImportAKSProjects: () => mockHookReturn,
+}));
+
+// Import after mocks
+import type { DiscoveredNamespace } from '../../hooks/useNamespaceDiscovery';
+import ImportAKSProjects from './ImportAKSProjects';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeNs(overrides: Partial<DiscoveredNamespace> = {}): DiscoveredNamespace {
+  return {
+    name: 'test-ns',
+    clusterName: 'test-cluster',
+    resourceGroup: 'test-rg',
+    subscriptionId: 'test-sub',
+    labels: {},
+    provisioningState: 'Succeeded',
+    isAksProject: true,
+    isManagedNamespace: true,
+    category: 'needs-import',
+    ...overrides,
+  };
+}
+
+function defaultHookReturn(overrides: Partial<any> = {}) {
+  return {
+    error: '',
+    success: '',
+    namespaces: [],
+    loadingNamespaces: false,
+    discoveryError: null,
+    registeredClustersReady: true,
+    importing: false,
+    importProgress: '',
+    importResults: undefined,
+    showConversionDialog: false,
+    namespacesToConvert: [],
+    namespacesToImport: [],
+    refresh: mockRefresh,
+    clearError: mockClearError,
+    clearSuccess: mockClearSuccess,
+    clearDiscoveryError: mockClearDiscoveryError,
+    handleImportClick: mockHandleImportClick,
+    handleConversionConfirm: mockHandleConversionConfirm,
+    handleConversionClose: mockHandleConversionClose,
+    handleCancel: mockHandleCancel,
+    handleGoToProjects: mockHandleGoToProjects,
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('ImportAKSProjects', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockHookReturn = defaultHookReturn();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  // -------------------------------------------------------------------------
+  // Rendering
+  // -------------------------------------------------------------------------
+
+  test('renders namespace table with discovered namespaces', () => {
+    mockHookReturn = defaultHookReturn({
+      namespaces: [makeNs({ name: 'ns1' }), makeNs({ name: 'ns2' })],
+    });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByTestId('row-ns1')).toBeInTheDocument();
+    expect(screen.getByTestId('row-ns2')).toBeInTheDocument();
+  });
+
+  test('selects same-name namespaces independently across Azure scopes', () => {
+    const first = makeNs({ resourceGroup: 'first-rg', subscriptionId: 'first-sub' });
+    const second = makeNs({ resourceGroup: 'second-rg', subscriptionId: 'second-sub' });
+    mockHookReturn = defaultHookReturn({ namespaces: [first, second] });
+
+    render(<ImportAKSProjects />);
+    fireEvent.click(screen.getAllByTestId('row-test-ns')[0].querySelector('input')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Import Selected Projects (1)' }));
+
+    expect(mockHandleImportClick).toHaveBeenCalledWith([{ namespace: first }]);
+  });
+
+  test('routes back navigation through cancellation handling', () => {
+    render(<ImportAKSProjects />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+
+    expect(mockHandleCancel).toHaveBeenCalledTimes(1);
+  });
+
+  test('disables back navigation while importing', () => {
+    mockHookReturn = defaultHookReturn({ importing: true });
+
+    render(<ImportAKSProjects />);
+
+    const backButton = screen.getByRole('button', { name: 'Back' });
+    expect(backButton).toBeDisabled();
+    fireEvent.click(backButton);
+    expect(mockHandleCancel).not.toHaveBeenCalled();
+  });
+
+  test('uses filled categorical colors for namespace types', () => {
+    mockHookReturn = defaultHookReturn({
+      namespaces: [
+        makeNs({ name: 'managed', isManagedNamespace: true }),
+        makeNs({ name: 'regular', isManagedNamespace: false }),
+      ],
+    });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByText('AKS Managed').closest('.MuiChip-root')).toHaveClass(
+      'MuiChip-filled',
+      'MuiChip-colorPrimary'
+    );
+    expect(screen.getByText('Regular').closest('.MuiChip-root')).toHaveClass(
+      'MuiChip-filled',
+      'MuiChip-colorDefault'
+    );
+  });
+
+  test('passes loading state to table', () => {
+    mockHookReturn = defaultHookReturn({ loadingNamespaces: true });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByTestId('namespace-table')).toHaveAttribute('data-loading', 'true');
+  });
+
+  test('shows error alert for import error', () => {
+    mockHookReturn = defaultHookReturn({ error: 'Something went wrong' });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByText('Something went wrong')).toBeInTheDocument();
+  });
+
+  test('shows error alert for discovery error', () => {
+    mockHookReturn = defaultHookReturn({ discoveryError: 'Discovery failed' });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByText('Discovery failed')).toBeInTheDocument();
+  });
+
+  test('shows success alert', () => {
+    mockHookReturn = defaultHookReturn({ success: 'Import complete' });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByText('Import complete')).toBeInTheDocument();
+  });
+
+  test('announces import progress', () => {
+    mockHookReturn = defaultHookReturn({ importProgress: 'Registering cluster: cluster-a' });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByRole('status')).toHaveTextContent('Registering cluster: cluster-a');
+  });
+
+  // -------------------------------------------------------------------------
+  // Table toolbar — Import button wiring
+  // -------------------------------------------------------------------------
+
+  test('calls handleImportClick with selected namespaces when Import is clicked', () => {
+    const ns = makeNs({ name: 'ns1' });
+    mockHookReturn = defaultHookReturn({ namespaces: [ns] });
+
+    render(<ImportAKSProjects />);
+
+    // Select the row via the table mock checkbox
+    const checkbox = screen.getByTestId('row-ns1').querySelector('input[type="checkbox"]')!;
+    fireEvent.click(checkbox);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import Selected Projects (1)' }));
+
+    expect(mockHandleImportClick).toHaveBeenCalledWith([{ namespace: ns }]);
+  });
+
+  test('calls refresh when Refresh button is clicked', () => {
+    render(<ImportAKSProjects />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  test('disables Refresh button while importing', () => {
+    mockHookReturn = defaultHookReturn({ importing: true });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+  });
+
+  test('disables Import button while importing', () => {
+    mockHookReturn = defaultHookReturn({
+      importing: true,
+      namespaces: [makeNs({ name: 'ns1' })],
+    });
+
+    render(<ImportAKSProjects />);
+    const checkbox = screen.getByTestId('row-ns1').querySelector('input[type="checkbox"]')!;
+    fireEvent.click(checkbox);
+
+    expect(screen.getByRole('button', { name: /Importing/ })).toBeDisabled();
+  });
+
+  test('disables Import button while namespaces are loading', () => {
+    mockHookReturn = defaultHookReturn({
+      loadingNamespaces: true,
+      namespaces: [makeNs({ name: 'ns1' })],
+    });
+
+    render(<ImportAKSProjects />);
+    const checkbox = screen.getByTestId('row-ns1').querySelector('input[type="checkbox"]')!;
+    fireEvent.click(checkbox);
+
+    expect(screen.getByRole('button', { name: 'Import Selected Projects (1)' })).toBeDisabled();
+  });
+
+  test('disables Import button until registered clusters are ready', () => {
+    mockHookReturn = defaultHookReturn({
+      registeredClustersReady: false,
+      namespaces: [makeNs({ name: 'ns1' })],
+    });
+
+    render(<ImportAKSProjects />);
+    fireEvent.click(screen.getByTestId('row-ns1').querySelector('input[type="checkbox"]')!);
+
+    expect(screen.getByRole('button', { name: 'Import Selected Projects (1)' })).toBeDisabled();
+  });
+
+  // -------------------------------------------------------------------------
+  // Table / results visibility
+  // -------------------------------------------------------------------------
+
+  test('hides table and shows results when all imports succeed', () => {
+    mockHookReturn = defaultHookReturn({
+      importResults: [
+        { namespace: 'ns1 (cluster-a)', clusterName: 'cluster-a', success: true, message: 'ok' },
+      ],
+    });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.queryByTestId('namespace-table')).not.toBeInTheDocument();
+    expect(screen.getByText(/ns1 \(cluster-a\)/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
+  });
+
+  test('renders same-name results without duplicate React keys', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockHookReturn = defaultHookReturn({
+      importResults: [
+        { namespace: 'ns1 (cluster-a)', clusterName: 'cluster-a', success: true, message: 'first' },
+        {
+          namespace: 'ns1 (cluster-a)',
+          clusterName: 'cluster-a',
+          success: true,
+          message: 'second',
+        },
+      ],
+    });
+
+    try {
+      render(<ImportAKSProjects />);
+
+      expect(screen.getAllByText('ns1 (cluster-a)')).toHaveLength(2);
+      expect(consoleError.mock.calls.flat().join(' ')).not.toContain(
+        'Encountered two children with the same key'
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test('keeps table visible when all imports fail (allows retry)', () => {
+    mockHookReturn = defaultHookReturn({
+      importResults: [
+        {
+          namespace: 'ns1 (cluster-a)',
+          clusterName: 'cluster-a',
+          success: false,
+          message: 'auth error',
+        },
+      ],
+    });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByTestId('namespace-table')).toBeInTheDocument();
+  });
+
+  test('shows Go To Projects button when some imports succeed', () => {
+    mockHookReturn = defaultHookReturn({
+      importResults: [{ namespace: 'ns1 (cl)', clusterName: 'cl', success: true, message: 'ok' }],
+    });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByText('Go To Projects')).toBeInTheDocument();
+  });
+
+  test('hides Go To Projects button when all imports fail', () => {
+    mockHookReturn = defaultHookReturn({
+      importResults: [{ namespace: 'ns1 (cl)', clusterName: 'cl', success: false, message: 'err' }],
+    });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.queryByText('Go To Projects')).not.toBeInTheDocument();
+  });
+
+  test('calls handleGoToProjects when Go To Projects is clicked', () => {
+    mockHookReturn = defaultHookReturn({
+      importResults: [{ namespace: 'ns1 (cl)', clusterName: 'cl', success: true, message: 'ok' }],
+    });
+
+    render(<ImportAKSProjects />);
+    fireEvent.click(screen.getByText('Go To Projects'));
+
+    expect(mockHandleGoToProjects).toHaveBeenCalledTimes(1);
+  });
+
+  test('calls handleCancel when Close is clicked', () => {
+    mockHookReturn = defaultHookReturn({
+      importResults: [{ namespace: 'ns1 (cl)', clusterName: 'cl', success: true, message: 'ok' }],
+    });
+
+    render(<ImportAKSProjects />);
+    fireEvent.click(screen.getByText('Close'));
+
+    expect(mockHandleCancel).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // ConversionDialog wiring
+  // -------------------------------------------------------------------------
+
+  test('shows ConversionDialog when showConversionDialog is true', () => {
+    mockHookReturn = defaultHookReturn({
+      showConversionDialog: true,
+      namespacesToConvert: [makeNs({ name: 'ns-convert', isAksProject: false })],
+      namespacesToImport: [],
+    });
+
+    render(<ImportAKSProjects />);
+
+    expect(screen.getByText('Convert Namespaces to AKS Projects')).toBeInTheDocument();
+  });
+
+  test('calls handleConversionClose when Cancel is clicked in dialog', () => {
+    mockHookReturn = defaultHookReturn({
+      showConversionDialog: true,
+      namespacesToConvert: [makeNs({ name: 'ns-convert', isAksProject: false })],
+      namespacesToImport: [],
+    });
+
+    render(<ImportAKSProjects />);
+    fireEvent.click(within(screen.getByRole('dialog')).getByText('Cancel'));
+
+    expect(mockHandleConversionClose).toHaveBeenCalledTimes(1);
+  });
+
+  test('calls handleConversionConfirm when Confirm & Import is clicked in dialog', () => {
+    mockHookReturn = defaultHookReturn({
+      showConversionDialog: true,
+      namespacesToConvert: [makeNs({ name: 'ns-convert', isAksProject: false })],
+      namespacesToImport: [],
+    });
+
+    render(<ImportAKSProjects />);
+    fireEvent.click(screen.getByText('Confirm & Import'));
+
+    expect(mockHandleConversionConfirm).toHaveBeenCalledTimes(1);
+  });
+});
